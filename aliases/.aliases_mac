@@ -1,0 +1,15 @@
+# kolorowy ls (BSD)
+alias ls='ls -G'
+
+# Homebrew
+alias brewup='brew update && brew upgrade'
+
+# IP
+alias myip='ipconfig getifaddr en0'
+
+# Finder
+alias showfiles='defaults write com.apple.finder AppleShowAllFiles YES && killall Finder'
+alias hidefiles='defaults write com.apple.finder AppleShowAllFiles NO && killall Finder'
+alias desktophide='defaults write com.apple.finder CreateDesktop false && killall Finder'
+alias desktopshow='defaults write com.apple.finder CreateDesktop true && killall Finder'
+alias flushdns='sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder'

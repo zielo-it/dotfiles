@@ -1,0 +1,14 @@
+# kolorowy ls (GNU)
+alias ls='ls --color=auto'
+alias cls='clear'
+alias dfh='df -h'
+alias duh='du -sh ./* 2>/dev/null'
+alias ports='ss -tulpen'
+
+# pacman
+alias update='sudo pacman -Syu'
+alias install='sudo pacman -S'
+alias remove='sudo pacman -Rns'
+
+# IP
+alias myip='curl ifconfig.me'
