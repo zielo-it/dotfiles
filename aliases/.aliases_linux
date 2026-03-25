@@ -11,4 +11,4 @@ alias install='sudo pacman -S'
 alias remove='sudo pacman -Rns'
 
 # IP
-alias myip='curl ifconfig.me'
+alias myip_private='ip route get 1.1.1.1 | awk "{print \$7; exit}"'

@@ -5,7 +5,7 @@ alias ls='ls -G'
 alias brewup='brew update && brew upgrade'
 
 # IP
-alias myip='ipconfig getifaddr en0'
+alias myip_private='ipconfig getifaddr en0'
 
 # Finder
 alias showfiles='defaults write com.apple.finder AppleShowAllFiles YES && killall Finder'

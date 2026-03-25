@@ -12,6 +12,9 @@ alias h='history 0 | grep'
 alias reload='source ~/.zshrc'
 alias path='echo $PATH | tr ":" "\n"'
 
+# --- IP ---
+alias myip_public='curl ifconfig.me'
+
 # --- bezpieczne operacje ---
 alias cp='cp -i'
 alias mv='mv -i'
