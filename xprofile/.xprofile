@@ -1,0 +1,13 @@
+#!/bin/sh
+
+# Let Qt applications inherit the GTK system theme.
+export QT_QPA_PLATFORMTHEME=gtk3
+
+# Pass the graphical session environment to D-Bus and systemd user services.
+if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment --systemd \
+        QT_QPA_PLATFORMTHEME \
+        XDG_CURRENT_DESKTOP \
+        XDG_SESSION_DESKTOP \
+        XDG_SESSION_TYPE
+fi

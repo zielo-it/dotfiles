@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly SCHEMA="org.gnome.desktop.interface"
+
+set_setting() {
+  local key="$1"
+  local value="$2"
+
+  if [ "$(gsettings get "$SCHEMA" "$key")" != "$value" ]; then
+    gsettings set "$SCHEMA" "$key" "$value"
+  fi
+}
+
+set_setting color-scheme "'prefer-dark'"
+set_setting gtk-theme "'Adwaita-dark'"
+set_setting icon-theme "'Papirus-Dark'"
+
+if command -v xsettingsd >/dev/null 2>&1; then
+  systemctl --user start xsettingsd.service
+fi

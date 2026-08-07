@@ -1,0 +1,91 @@
+general {
+    output_format = "i3bar"
+    colors = true
+    color_good = "#cdd6f4"
+    color_degraded = "#f9e2af"
+    color_bad = "#f38ba8"
+    interval = 2
+}
+
+order += "cpu_usage"
+order += "memory"
+order += "disk /"
+order += "wireless _first_"
+order += "ethernet _first_"
+order += "read_file brightness"
+order += "volume master"
+order += "battery all"
+order += "tztime local"
+
+cpu_usage {
+    format = "CPU %usage"
+    degraded_threshold = 75
+    max_threshold = 90
+    separator_block_width = 16
+}
+
+memory {
+    format = "RAM %used"
+    memory_used_method = "memavailable"
+    unit = "Gi"
+    decimals = 1
+    threshold_degraded = "1G"
+    threshold_critical = "512M"
+    format_degraded = "RAM %free"
+    separator_block_width = 16
+}
+
+disk "/" {
+    format = "SSD %avail"
+    low_threshold = 10
+    threshold_type = "percentage_avail"
+    separator_block_width = 16
+}
+
+wireless _first_ {
+    format_up = "NET %essid"
+    format_down = "NET offline"
+    color_good = "#cdd6f4"
+    separator_block_width = 16
+}
+
+ethernet _first_ {
+    format_up = "LAN %ip"
+    format_down = ""
+    color_good = "#cdd6f4"
+    separator_block_width = 16
+}
+
+read_file brightness {
+    path = "/run/user/1000/i3status-brightness"
+    format = "BRI %content"
+    format_bad = "BRI ?"
+    separator_block_width = 16
+}
+
+volume master {
+    format = "VOL %volume"
+    format_muted = "VOL muted"
+    device = "pulse"
+    separator_block_width = 16
+}
+
+battery all {
+    format = "%status %percentage %remaining"
+    format_down = ""
+    format_percentage = "%.0f%s"
+    status_chr = "BAT+"
+    status_bat = "BAT"
+    status_unk = "BAT?"
+    status_full = "BAT"
+    status_idle = "BAT"
+    low_threshold = 15
+    threshold_type = "percentage"
+    last_full_capacity = true
+    hide_seconds = true
+    separator_block_width = 16
+}
+
+tztime local {
+    format = "%m.%d %H:%M"
+}

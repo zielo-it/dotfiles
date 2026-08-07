@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  up) brightnessctl set +5% >/dev/null ;;
+  down) brightnessctl set 5%- >/dev/null ;;
+  sync) ;;
+  *)
+    printf 'Usage: %s {up|down|sync}\n' "$0" >&2
+    exit 2
+    ;;
+esac
+
+status_file="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/i3status-brightness"
+percentage="$(brightnessctl -m | awk -F, 'NR == 1 {gsub(/%/, "", $4); print $4}')"
+
+printf '%s%%\n' "$percentage" >"$status_file"
+pkill -USR1 -x i3status 2>/dev/null || true

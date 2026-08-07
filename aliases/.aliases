@@ -1,4 +1,5 @@
-# --- podstawowe aliasy ---
+# --- basic aliases ---
+alias ls='ls --color=auto'
 alias ll='ls -la'
 alias la='ls -A'
 alias l='ls -CF'
@@ -8,20 +9,38 @@ alias ...='cd ../..'
 alias -- -='cd -'
 
 alias c='clear'
+alias cls='clear'
 alias h='history 0 | grep'
-alias reload='source ~/.zshrc'
+reload_shell() {
+  case "${SHELL##*/}" in
+    zsh) source "$HOME/.zshrc" ;;
+    *) source "$HOME/.bashrc" ;;
+  esac
+}
+alias reload='reload_shell'
 alias path='echo $PATH | tr ":" "\n"'
 
 # --- IP ---
 alias myip_public='curl ifconfig.me'
+alias myip_private='ip route get 1.1.1.1 | awk "{print \$7; exit}"'
 
-# --- bezpieczne operacje ---
+# --- system information ---
+alias dfh='df -h'
+alias duh='du -sh ./* 2>/dev/null'
+alias ports='ss -tulpen'
+
+# --- pacman ---
+alias update='sudo pacman -Syu'
+alias install='sudo pacman -S'
+alias remove='sudo pacman -Rns'
+
+# --- safe operations ---
 alias cp='cp -i'
 alias mv='mv -i'
 alias rm='rm -i'
 alias mkdir='mkdir -pv'
 
-# --- katalogi i edycja ---
+# --- directories and editing ---
 alias md='mkdir -p'
 alias rd='rmdir'
 alias e='$EDITOR'
@@ -42,13 +61,3 @@ alias gco='git checkout'
 alias gcb='git checkout -b'
 alias gcom='git checkout main'
 alias glog='git log --oneline --graph --decorate -20'
-
-# --- system-specific ---
-case "$OSTYPE" in
-  darwin*)
-    [ -f "$HOME/.aliases_mac" ] && source "$HOME/.aliases_mac"
-    ;;
-  linux*)
-    [ -f "$HOME/.aliases_linux" ] && source "$HOME/.aliases_linux"
-    ;;
-esac
