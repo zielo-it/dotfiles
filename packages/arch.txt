@@ -49,6 +49,7 @@ snapper
 sof-firmware
 thunar
 thunar-volman
+tldr
 touchegg
 ttf-jetbrains-mono-nerd
 ttf-liberation
