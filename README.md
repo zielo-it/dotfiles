@@ -21,6 +21,19 @@ sudo pacman -S --needed - < packages/arch.txt
 
 The list contains only packages from the official repositories.
 
+## Keyboard layout
+
+Set the Polish programmer's layout as the system default for both the Linux
+console and Xorg:
+
+```bash
+sudo localectl set-keymap pl2
+```
+
+This also ensures that Xorg keeps the Polish layout when a keyboard is
+reconnected or udev is reloaded. The i3 configuration reapplies the matching
+XKB layout (`pl`) whenever i3 starts or reloads.
+
 ## Dark mode
 
 The i3 session publishes a dark system preference through GSettings, the
