@@ -7,6 +7,7 @@ brightnessctl
 code
 btrfs-progs
 dunst
+fastfetch
 feh
 firefox
 flameshot
