@@ -30,6 +30,7 @@ bindsym $mod+Return exec --no-startup-id $term
 bindsym $mod+d exec --no-startup-id $menu
 bindsym $mod+e exec --no-startup-id thunar
 bindsym $mod+w exec --no-startup-id firefox
+bindsym $mod+Shift+w exec --no-startup-id ~/.local/bin/wallpaper next
 bindsym $mod+Shift+x exec --no-startup-id i3lock -c 1e1e2e
 bindsym Print exec --no-startup-id flameshot gui
 bindsym $mod+Shift+s exec --no-startup-id flameshot gui
@@ -130,7 +131,7 @@ bindsym $mod+r mode "resize"
 exec_always --no-startup-id setxkbmap -layout pl
 exec_always --no-startup-id xset r rate 250 35
 exec_always --no-startup-id ~/dotfiles/scripts/brightness-status sync
-exec_always --no-startup-id xsetroot -solid $bg
+exec_always --no-startup-id ~/.local/bin/wallpaper watch
 exec_always --no-startup-id ~/dotfiles/scripts/apply-dark-mode
 exec --no-startup-id nm-applet
 exec --no-startup-id blueman-applet

@@ -53,6 +53,7 @@ ensure_line_if_file_exists() {
 
 main() {
   link_file "$DOTFILES_DIR/aliases/.aliases" "$HOME/.aliases"
+  link_file "$DOTFILES_DIR/scripts/wallpaper" "$HOME/.local/bin/wallpaper"
 
   link_file "$DOTFILES_DIR/i3/config" "$HOME/.config/i3/config"
   link_file "$DOTFILES_DIR/i3status/config" "$HOME/.config/i3status/config"
@@ -62,6 +63,7 @@ main() {
   link_file "$DOTFILES_DIR/dunst/dunstrc" "$HOME/.config/dunst/dunstrc"
   link_file "$DOTFILES_DIR/flameshot/flameshot.ini" "$HOME/.config/flameshot/flameshot.ini"
   link_file "$DOTFILES_DIR/picom/picom.conf" "$HOME/.config/picom/picom.conf"
+  link_file "$DOTFILES_DIR/wallpaper/config" "$HOME/.config/wallpaper/config"
   link_file "$DOTFILES_DIR/touchegg/touchegg.conf" "$HOME/.config/touchegg/touchegg.conf"
   link_file "$DOTFILES_DIR/gtk-3.0/settings.ini" "$HOME/.config/gtk-3.0/settings.ini"
   link_file "$DOTFILES_DIR/gtk-4.0/settings.ini" "$HOME/.config/gtk-4.0/settings.ini"

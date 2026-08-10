@@ -1,0 +1,23 @@
+# Keep the image collection outside the dotfiles repository.
+WALLPAPER_REPOSITORY="https://github.com/rose-pine/wallpapers.git"
+WALLPAPER_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/wallpapers/rose-pine"
+
+# Relative files and directories used for random selection. The repository
+# also contains anime, Minecraft, general OS, and photography collections;
+# add their paths here if you want them in the rotation.
+WALLPAPER_SOURCES=(
+  "generative"
+  "illustration"
+  "os/arch.jpg"
+  "os/arch-btw.png"
+  "os/arch-btw-moon.png"
+  "os/arch-btw-dawn.png"
+)
+
+# Pick a new wallpaper every 30 minutes. Set to 0 to change only at login
+# and when the keyboard shortcut is used.
+WALLPAPER_INTERVAL=1800
+
+# Supported feh modes: center, fill, max, scale, tile.
+WALLPAPER_MODE="fill"
+WALLPAPER_FALLBACK_COLOR="#1e1e2e"

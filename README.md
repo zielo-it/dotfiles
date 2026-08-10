@@ -21,6 +21,32 @@ sudo pacman -S --needed - < packages/arch.txt
 
 The list contains only packages from the official repositories.
 
+## Random wallpapers
+
+The i3 session uses `feh` to select a random image at login and every 30
+minutes. `Mod+Shift+w` selects the next image immediately. The default
+collection is [Rosé Pine Wallpapers](https://github.com/rose-pine/wallpapers),
+using its matching illustrations, generative art, and Arch/Arch BTW variants.
+The repository is CC0-1.0; its optional photography section documents its
+separate CC BY-SA 4.0 attribution requirements upstream.
+
+Download the collection once after installing the dotfiles:
+
+```bash
+~/.local/bin/wallpaper sync
+~/.local/bin/wallpaper next
+```
+
+Images stay outside this repository in
+`~/.local/share/wallpapers/rose-pine`. Change the repository, directory,
+rotation interval, or fit mode in `wallpaper/config`. Setting
+`WALLPAPER_INTERVAL=0` keeps random selection at login and through the
+keyboard shortcut, but disables timed rotation. `~/.local/bin/wallpaper sync`
+also performs a safe fast-forward update when the collection is already
+present. The `WALLPAPER_SOURCES` list can opt additional folders such as
+`anime`, `minecraft`, or `photography` into the rotation. Restart i3 with
+`Mod+Shift+r` after changing rotation settings to replace the watcher at once.
+
 ## Keyboard layout
 
 Set the Polish programmer's layout as the system default for both the Linux
@@ -81,6 +107,7 @@ gestures operate on the currently focused display:
 | `Mod+d` | Rofi launcher |
 | `Mod+e` | Thunar file manager |
 | `Mod+w` | Firefox |
+| `Mod+Shift+w` | next random wallpaper |
 | `Mod+Shift+x` | lock the screen |
 | `Print` | interactive screenshot |
 | `Mod+Shift+r` | restart i3 |

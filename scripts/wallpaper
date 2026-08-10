@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+readonly script_dir="$(cd -- "$(dirname -- "$script_path")" && pwd -P)"
+readonly user_config="${XDG_CONFIG_HOME:-$HOME/.config}/wallpaper/config"
+readonly repo_config="$script_dir/../wallpaper/config"
+
+load_config() {
+  if [ -r "$user_config" ]; then
+    # shellcheck source=/dev/null
+    source "$user_config"
+  elif [ -r "$repo_config" ]; then
+    # Allow the script to work before install.sh creates the config symlink.
+    # shellcheck source=/dev/null
+    source "$repo_config"
+  else
+    printf 'Wallpaper config not found: %s\n' "$user_config" >&2
+    exit 1
+  fi
+}
+
+load_config
+
+readonly state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/wallpaper"
+readonly state_file="$state_dir/current"
+readonly runtime_dir="${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/wallpaper"
+
+usage() {
+  cat <<'EOF'
+Usage: wallpaper [next|watch|sync|current]
+
+  next     Set a random wallpaper (the default command).
+  watch    Set one now, then rotate at WALLPAPER_INTERVAL.
+  sync     Clone or fast-forward the configured wallpaper repository.
+  current  Print the path of the current wallpaper.
+EOF
+}
+
+die() {
+  printf 'wallpaper: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+validate_config() {
+  : "${WALLPAPER_REPOSITORY:?WALLPAPER_REPOSITORY is not set}"
+  : "${WALLPAPER_DIR:?WALLPAPER_DIR is not set}"
+  : "${WALLPAPER_INTERVAL:?WALLPAPER_INTERVAL is not set}"
+  : "${WALLPAPER_MODE:?WALLPAPER_MODE is not set}"
+  : "${WALLPAPER_FALLBACK_COLOR:?WALLPAPER_FALLBACK_COLOR is not set}"
+
+  [[ "$WALLPAPER_INTERVAL" =~ ^[0-9]+$ ]] ||
+    die "WALLPAPER_INTERVAL must be a non-negative integer"
+
+  case "$WALLPAPER_MODE" in
+    center|fill|max|scale|tile) ;;
+    *) die "unsupported WALLPAPER_MODE: $WALLPAPER_MODE" ;;
+  esac
+
+  if ! declare -p WALLPAPER_SOURCES >/dev/null 2>&1; then
+    WALLPAPER_SOURCES=(".")
+  fi
+}
+
+apply_fallback() {
+  if command -v xsetroot >/dev/null 2>&1; then
+    xsetroot -solid "$WALLPAPER_FALLBACK_COLOR" 2>/dev/null || true
+  fi
+}
+
+read_current() {
+  local current=""
+
+  if [ -r "$state_file" ]; then
+    IFS= read -r -d '' current <"$state_file" || true
+  fi
+
+  printf '%s' "$current"
+}
+
+set_random() (
+  local current index selected source temporary_state
+  local -a search_paths=()
+  local -a wallpapers=()
+
+  require_command feh
+  require_command find
+  require_command flock
+
+  mkdir -p -- "$state_dir"
+  exec 8>"$state_dir/set.lock"
+  flock 8
+
+  if [ ! -d "$WALLPAPER_DIR" ]; then
+    apply_fallback
+    die "wallpaper directory does not exist; run '$script_dir/wallpaper sync'"
+  fi
+
+  for source in "${WALLPAPER_SOURCES[@]}"; do
+    if [[ "$source" = /* ]]; then
+      search_paths+=("$source")
+    else
+      search_paths+=("$WALLPAPER_DIR/$source")
+    fi
+  done
+
+  mapfile -d '' -t wallpapers < <(
+    for source in "${search_paths[@]}"; do
+      [ -e "$source" ] || continue
+      find -H "$source" \
+        -type d -name .git -prune -o \
+        -type f \( \
+          -iname '*.jpg' -o \
+          -iname '*.jpeg' -o \
+          -iname '*.png' -o \
+          -iname '*.webp' \
+        \) -print0
+    done
+  )
+
+  if [ "${#wallpapers[@]}" -eq 0 ]; then
+    apply_fallback
+    die "no supported images found in the configured WALLPAPER_SOURCES"
+  fi
+
+  current="$(read_current)"
+  index=$((RANDOM % ${#wallpapers[@]}))
+  selected="${wallpapers[$index]}"
+
+  # Avoid an immediate repeat when at least two images are available.
+  if [ "${#wallpapers[@]}" -gt 1 ] && [ "$selected" = "$current" ]; then
+    index=$(((index + 1) % ${#wallpapers[@]}))
+    selected="${wallpapers[$index]}"
+  fi
+
+  if ! feh --no-fehbg "--bg-$WALLPAPER_MODE" "$selected"; then
+    die "feh could not set wallpaper: $selected"
+  fi
+
+  temporary_state="$(mktemp "$state_file.tmp.XXXXXX")"
+  printf '%s\0' "$selected" >"$temporary_state"
+  mv -f -- "$temporary_state" "$state_file"
+  printf 'Wallpaper: %s\n' "$selected"
+)
+
+watch_wallpapers() {
+  local existing_pid sleep_pid=""
+  local watch_lock="$runtime_dir/watch.lock"
+
+  require_command flock
+  mkdir -p -- "$runtime_dir"
+
+  exec 9<>"$watch_lock"
+  if ! flock -n 9; then
+    # Replace the watcher after an i3 restart so config changes apply at once.
+    if IFS= read -r existing_pid <"$watch_lock" &&
+      [[ "$existing_pid" =~ ^[0-9]+$ ]] &&
+      kill -0 "$existing_pid" 2>/dev/null; then
+      kill -TERM "$existing_pid" 2>/dev/null || true
+      flock -w 5 9 || return 0
+    else
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "$BASHPID" >"$watch_lock"
+  trap 'if [ -n "${sleep_pid:-}" ]; then kill "$sleep_pid" 2>/dev/null || true; fi; exit 0' HUP INT TERM
+
+  while :; do
+    # Use a fresh process so errors keep their normal set -e behavior and the
+    # newest script and source configuration are used for every selection.
+    "$script_path" next 9>&- || true
+    load_config
+    validate_config
+
+    if [ "$WALLPAPER_INTERVAL" -eq 0 ]; then
+      return 0
+    fi
+
+    sleep "$WALLPAPER_INTERVAL" 9>&- &
+    sleep_pid=$!
+    wait "$sleep_pid" || true
+    sleep_pid=""
+  done
+}
+
+sync_wallpapers() (
+  local parent_dir remote_url
+
+  require_command git
+  require_command flock
+  mkdir -p -- "$state_dir"
+  exec 8>"$state_dir/set.lock"
+  flock 8
+
+  parent_dir="$(dirname -- "$WALLPAPER_DIR")"
+  mkdir -p -- "$parent_dir"
+
+  if [ -d "$WALLPAPER_DIR" ] && [ -e "$WALLPAPER_DIR/.git" ] &&
+    git -C "$WALLPAPER_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    remote_url="$(git -C "$WALLPAPER_DIR" remote get-url origin)" ||
+      die "the existing repository has no origin remote: $WALLPAPER_DIR"
+    printf 'Updating wallpapers from %s\n' "$remote_url"
+    git -C "$WALLPAPER_DIR" pull --ff-only
+    return
+  fi
+
+  if [ -e "$WALLPAPER_DIR" ]; then
+    die "refusing to replace a non-Git path: $WALLPAPER_DIR"
+  fi
+
+  printf 'Downloading wallpapers to %s\n' "$WALLPAPER_DIR"
+  git clone --depth 1 -- "$WALLPAPER_REPOSITORY" "$WALLPAPER_DIR"
+)
+
+show_current() {
+  local current
+  current="$(read_current)"
+  [ -n "$current" ] || die "no wallpaper has been selected yet"
+  printf '%s\n' "$current"
+}
+
+main() {
+  validate_config
+
+  case "${1:-next}" in
+    next) set_random ;;
+    watch) watch_wallpapers ;;
+    sync) sync_wallpapers ;;
+    current) show_current ;;
+    -h|--help|help) usage ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
