@@ -10,15 +10,13 @@ alias -- -='cd -'
 
 alias c='clear'
 alias cls='clear'
-alias h='history 0 | grep'
-reload_shell() {
-  case "${SHELL##*/}" in
-    zsh) source "$HOME/.zshrc" ;;
-    *) source "$HOME/.bashrc" ;;
-  esac
-}
-alias reload='reload_shell'
+alias h='history | grep --'
+alias reload='source "$HOME/.bashrc"'
 alias path='echo $PATH | tr ":" "\n"'
+
+# --- dotfiles ---
+alias dot='git -C "$HOME/dotfiles"'
+alias cddot='cd "$HOME/dotfiles"'
 
 # --- IP ---
 alias myip_public='curl ifconfig.me'
@@ -26,13 +24,23 @@ alias myip_private='ip route get 1.1.1.1 | awk "{print \$7; exit}"'
 
 # --- system information ---
 alias dfh='df -h'
-alias duh='du -sh ./* 2>/dev/null'
+alias duh='du -h --max-depth=1 -- . 2>/dev/null | sort -h'
 alias ports='ss -tulpen'
+alias disks='lsblk -o NAME,SIZE,TYPE,FSTYPE,FSAVAIL,FSUSE%,MOUNTPOINTS'
+
+# --- systemd ---
+alias sctl='systemctl'
+alias sctlu='systemctl --user'
+alias failed='systemctl --failed'
+alias jerr='journalctl -b -p err'
 
 # --- pacman ---
-alias update='sudo pacman -Syu'
-alias install='sudo pacman -S'
-alias remove='sudo pacman -Rns'
+alias pacup='sudo pacman -Syu'
+alias paci='sudo pacman -S --needed'
+alias pacrm='sudo pacman -Rns'
+alias pacs='pacman -Ss'
+alias pacq='pacman -Qs'
+alias pacown='pacman -Qo'
 
 # --- safe operations ---
 alias cp='cp -i'
@@ -44,20 +52,56 @@ alias mkdir='mkdir -pv'
 alias md='mkdir -p'
 alias rd='rmdir'
 alias e='$EDITOR'
+mkcd() {
+  if [ "$#" -ne 1 ]; then
+    printf 'usage: mkcd DIRECTORY\n' >&2
+    return 2
+  fi
+
+  command mkdir -p -- "$1" && cd -- "$1"
+}
+
+# --- network ---
+alias ips='ip -brief address'
+alias routes='ip route'
+alias net='nmcli device status'
+alias wifi='nmcli device wifi list'
+
+# --- clipboard ---
+alias clipin='xclip -selection clipboard'
+alias clipout='xclip -selection clipboard -o'
 
 # --- git ---
 alias g='git'
 alias gs='git status'
 alias ga='git add'
-alias gc='git commit -m'
+alias gaa='git add --all'
+alias gap='git add --patch'
+alias gc='git commit'
+alias gcm='git commit -m'
 alias gca='git commit --amend --no-edit'
 alias gp='git push'
+alias gpu='git push -u origin HEAD'
 alias gpfl='git push --force-with-lease'
 alias gl='git pull'
+alias gup='git pull --ff-only'
+alias gf='git fetch --all --prune'
 alias gd='git diff'
 alias gds='git diff --staged'
 alias gb='git branch'
 alias gco='git checkout'
 alias gcb='git checkout -b'
+alias gsw='git switch'
+alias gswc='git switch -c'
+alias grs='git restore'
+alias grss='git restore --staged'
+alias gst='git stash push -u'
+alias gstp='git stash pop'
 alias gcom='git checkout main'
 alias glog='git log --oneline --graph --decorate -20'
+croot() {
+  local root
+
+  root="$(git rev-parse --show-toplevel)" || return
+  cd -- "$root"
+}

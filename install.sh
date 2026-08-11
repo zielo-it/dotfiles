@@ -72,7 +72,6 @@ main() {
   link_file "$DOTFILES_DIR/xprofile/.xprofile" "$HOME/.xprofile"
 
   ensure_line_if_file_exists "$HOME/.bashrc" "$ALIASES_LINE"
-  ensure_line_if_file_exists "$HOME/.zshrc" "$ALIASES_LINE"
 
   log "Done ✔"
   log "Reload i3 with Mod+Shift+r."
