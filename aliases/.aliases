@@ -33,6 +33,7 @@ alias sctl='systemctl'
 alias sctlu='systemctl --user'
 alias failed='systemctl --failed'
 alias jerr='journalctl -b -p err'
+alias jwarn='journalctl -b -p warning'
 
 # --- pacman ---
 alias pacup='sudo pacman -Syu'

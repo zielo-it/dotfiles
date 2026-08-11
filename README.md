@@ -2,22 +2,22 @@
 
 Shell configuration and a lightweight Arch Linux desktop built around i3.
 
-## Installation on an existing system
+## Installation on an existing Arch Linux system
 
 ```bash
 git clone https://github.com/zielo-it/dotfiles.git ~/dotfiles
 cd ~/dotfiles
+sudo pacman -S --needed - < packages/arch.txt
+sudo ./system/install.sh
 ./install.sh
 ```
 
-The installer creates symbolic links. If a target file already exists, it is
-preserved with a `.backup.YYYYMMDD-HHMMSS` suffix.
+The system installer copies root-owned Xorg and wireless regulatory-domain
+configuration into `/etc`. The user installer creates symbolic links in the
+home directory. If a managed target already exists with different contents,
+it is preserved with a `.backup.YYYYMMDD-HHMMSS` suffix.
 
 ## Arch Linux packages
-
-```bash
-sudo pacman -S --needed - < packages/arch.txt
-```
 
 The list contains only packages from the official repositories.
 
@@ -60,6 +60,21 @@ This also ensures that Xorg keeps the Polish layout when a keyboard is
 reconnected or udev is reloaded. The i3 configuration reapplies the matching
 XKB layout (`pl`) whenever i3 starts or reloads.
 
+## Wireless regulatory domain
+
+The package manifest installs the kernel's wireless regulatory database. The
+system installer configures its country code as Poland (`PL`) through
+`/etc/conf.d/wireless-regdom`. Change `system/wireless-regdom` before running
+the installer if the machine is used in another country. Reboot, then verify
+the active domain with:
+
+```bash
+iw reg get
+```
+
+An initramfs warning about missing firmware for `qat_6xxx` is intentionally
+not suppressed. It is harmless on machines without Intel QuickAssist hardware.
+
 ## Dark mode
 
 The i3 session publishes a dark system preference through GSettings, the
@@ -73,16 +88,9 @@ were already running may need to be restarted.
 
 ## Touchpad input
 
-Install the Xorg input rules once:
-
-```bash
-sudo install -Dm644 system/xorg/90-natural-scrolling.conf /etc/X11/xorg.conf.d/90-natural-scrolling.conf
-sudo install -Dm644 system/xorg/91-touchpad-tapping.conf /etc/X11/xorg.conf.d/91-touchpad-tapping.conf
-```
-
-They enable natural scrolling and tap-to-click. One-, two-, and three-finger
-taps map to left, right, and middle click. The rules are loaded automatically
-at the next login.
+The system installer installs the Xorg rules that enable natural scrolling
+and tap-to-click. One-, two-, and three-finger taps map to left, right, and
+middle click. The rules are loaded automatically at the next login.
 
 ## Touchpad gestures
 
