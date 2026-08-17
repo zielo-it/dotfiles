@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly DESKTOP_START=75
+readonly DESKTOP_END=80
+readonly LAPTOP_START=0
+readonly LAPTOP_END=100
+readonly DEFAULT_POWER_SUPPLY_ROOT=/sys/class/power_supply
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: battery-mode status|desktop|laptop
+
+  status   Show the active charging thresholds.
+  desktop  Keep the battery between 75% and 80% (requires root).
+  laptop   Allow charging from 0% to 100% (requires root).
+EOF
+}
+
+power_supply_root() {
+  # The override exists only so the hardware-independent test suite can use a
+  # temporary sysfs tree. sudo normally removes it from the environment.
+  printf '%s\n' "${BATTERY_MODE_SYSFS_ROOT:-$DEFAULT_POWER_SUPPLY_ROOT}"
+}
+
+find_battery() {
+  local root="$1"
+  local candidate
+  local type
+
+  if [ -d "$root/BAT0" ]; then
+    printf '%s\n' "$root/BAT0"
+    return
+  fi
+
+  shopt -s nullglob
+  for candidate in "$root"/*; do
+    [ -f "$candidate/type" ] || continue
+    read -r type < "$candidate/type"
+    if [ "$type" = "Battery" ]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  die "No battery was found below $root"
+}
+
+read_threshold() {
+  local file="$1"
+  local value
+
+  read -r value < "$file" || die "Cannot read $file"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "Invalid threshold in $file: $value"
+  ((value >= 0 && value <= 100)) || die "Threshold outside 0..100 in $file: $value"
+  printf '%s\n' "$value"
+}
+
+profile_name() {
+  local start="$1"
+  local end="$2"
+
+  if ((start == DESKTOP_START && end == DESKTOP_END)); then
+    printf 'desktop\n'
+  elif ((start == LAPTOP_START && end == LAPTOP_END)); then
+    printf 'laptop\n'
+  else
+    printf 'custom\n'
+  fi
+}
+
+write_threshold() {
+  local file="$1"
+  local value="$2"
+
+  printf '%s\n' "$value" > "$file"
+}
+
+restore_thresholds() {
+  local start_file="$1"
+  local end_file="$2"
+  local old_start="$3"
+  local old_end="$4"
+
+  # Zeroing the start value first gives the end threshold room to move back
+  # even after a partially completed profile switch.
+  write_threshold "$start_file" 0 2>/dev/null || true
+  write_threshold "$end_file" "$old_end" 2>/dev/null || true
+  write_threshold "$start_file" "$old_start" 2>/dev/null || true
+}
+
+apply_profile() {
+  local start_file="$1"
+  local end_file="$2"
+  local target_start="$3"
+  local target_end="$4"
+  local old_start
+  local old_end
+  local actual_start
+  local actual_end
+
+  old_start="$(read_threshold "$start_file")"
+  old_end="$(read_threshold "$end_file")"
+
+  if ((target_start > old_end)); then
+    if ! write_threshold "$end_file" "$target_end" ||
+      ! write_threshold "$start_file" "$target_start"; then
+      restore_thresholds "$start_file" "$end_file" "$old_start" "$old_end"
+      die "The threshold update failed; attempted to restore $old_start/$old_end"
+    fi
+  elif ((target_end < old_start)); then
+    if ! write_threshold "$start_file" "$target_start" ||
+      ! write_threshold "$end_file" "$target_end"; then
+      restore_thresholds "$start_file" "$end_file" "$old_start" "$old_end"
+      die "The threshold update failed; attempted to restore $old_start/$old_end"
+    fi
+  else
+    if ! write_threshold "$start_file" "$target_start" ||
+      ! write_threshold "$end_file" "$target_end"; then
+      restore_thresholds "$start_file" "$end_file" "$old_start" "$old_end"
+      die "The threshold update failed; attempted to restore $old_start/$old_end"
+    fi
+  fi
+
+  actual_start="$(read_threshold "$start_file")"
+  actual_end="$(read_threshold "$end_file")"
+  if ((actual_start != target_start || actual_end != target_end)); then
+    restore_thresholds "$start_file" "$end_file" "$old_start" "$old_end"
+    die "Readback mismatch; attempted to restore $old_start/$old_end"
+  fi
+}
+
+main() {
+  local command="${1:-status}"
+  local root
+  local battery
+  local start_file
+  local end_file
+  local start
+  local end
+
+  if [ "$#" -gt 1 ]; then
+    usage >&2
+    exit 2
+  fi
+
+  case "$command" in
+    status | desktop | laptop) ;;
+    -h | --help)
+      usage
+      exit
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+
+  root="$(power_supply_root)"
+  battery="$(find_battery "$root")"
+  start_file="$battery/charge_control_start_threshold"
+  end_file="$battery/charge_control_end_threshold"
+
+  [ -f "$start_file" ] || die "Unsupported battery: missing $start_file"
+  [ -f "$end_file" ] || die "Unsupported battery: missing $end_file"
+
+  if [ "$command" != status ]; then
+    if [ "$root" = "$DEFAULT_POWER_SUPPLY_ROOT" ] && [ "$EUID" -ne 0 ]; then
+      die "Changing charging thresholds requires root; use sudo battery-mode $command"
+    fi
+
+    case "$command" in
+      desktop) apply_profile "$start_file" "$end_file" "$DESKTOP_START" "$DESKTOP_END" ;;
+      laptop) apply_profile "$start_file" "$end_file" "$LAPTOP_START" "$LAPTOP_END" ;;
+    esac
+  fi
+
+  start="$(read_threshold "$start_file")"
+  end="$(read_threshold "$end_file")"
+  printf 'Battery: %s\nMode: %s\nStart charging: %s%%\nStop charging: %s%%\n' \
+    "$(basename "$battery")" "$(profile_name "$start" "$end")" "$start" "$end"
+}
+
+main "$@"

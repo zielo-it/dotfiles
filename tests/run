@@ -1,0 +1,643 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+TEST_ROOT="$(mktemp -d /tmp/dotfiles-tests.XXXXXX)"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+assert_fails_with() {
+  local expected="$1"
+  local output
+  shift
+
+  if output="$("$@" 2>&1)"; then
+    fail "command unexpectedly succeeded: $*"
+  fi
+  grep -Fq -- "$expected" <<< "$output" ||
+    fail "failure did not contain '$expected': $output"
+}
+
+assert_file_value() {
+  local file="$1"
+  local expected="$2"
+  local actual
+
+  read -r actual < "$file"
+  [ "$actual" = "$expected" ] ||
+    fail "$file contains '$actual', expected '$expected'"
+}
+
+test_syntax() {
+  local file
+  local i3_runtime="$TEST_ROOT/i3-runtime"
+
+  while IFS= read -r file; do
+    bash -n "$file"
+  done < <(
+    find \
+      "$ROOT_DIR/install.sh" \
+      "$ROOT_DIR/system/install.sh" \
+      "$ROOT_DIR/scripts" \
+      "$ROOT_DIR/system/bin" \
+      -type f -print
+  )
+  sh -n "$ROOT_DIR/xprofile/.xprofile"
+
+  if command -v xmllint >/dev/null 2>&1; then
+    xmllint --noout "$ROOT_DIR/touchegg/touchegg.conf"
+  fi
+
+  if command -v i3 >/dev/null 2>&1; then
+    mkdir -m 0700 "$i3_runtime"
+    XDG_RUNTIME_DIR="$i3_runtime" i3 -C -c "$ROOT_DIR/i3/config" >/dev/null
+  fi
+
+  LC_ALL=C sort -cu "$ROOT_DIR/packages/arch.txt"
+  LC_ALL=C sort -cu "$ROOT_DIR/packages/arch-explicit.txt"
+}
+
+test_battery_modes() {
+  local fixture="$TEST_ROOT/power_supply"
+  local battery="$fixture/BAT0"
+
+  mkdir -p "$battery"
+  printf 'Battery\n' > "$battery/type"
+  printf '0\n' > "$battery/charge_control_start_threshold"
+  printf '100\n' > "$battery/charge_control_end_threshold"
+
+  BATTERY_MODE_SYSFS_ROOT="$fixture" "$ROOT_DIR/system/bin/battery-mode" desktop >/dev/null
+  assert_file_value "$battery/charge_control_start_threshold" 75
+  assert_file_value "$battery/charge_control_end_threshold" 80
+
+  BATTERY_MODE_SYSFS_ROOT="$fixture" "$ROOT_DIR/system/bin/battery-mode" laptop >/dev/null
+  assert_file_value "$battery/charge_control_start_threshold" 0
+  assert_file_value "$battery/charge_control_end_threshold" 100
+
+  # Exercise the order needed when the current start exceeds the new end.
+  printf '90\n' > "$battery/charge_control_start_threshold"
+  printf '100\n' > "$battery/charge_control_end_threshold"
+  BATTERY_MODE_SYSFS_ROOT="$fixture" "$ROOT_DIR/system/bin/battery-mode" desktop >/dev/null
+  assert_file_value "$battery/charge_control_start_threshold" 75
+  assert_file_value "$battery/charge_control_end_threshold" 80
+}
+
+test_home_backup() {
+  local fixture="$TEST_ROOT/backup"
+  local fake_home="$fixture/home"
+  local fake_bin="$fixture/bin"
+  local calls="$fixture/restic.calls"
+
+  run_home_backup() {
+    env \
+      -u RESTIC_PASSWORD \
+      -u RESTIC_PASSWORD_COMMAND \
+      -u RESTIC_PASSWORD_FILE \
+      -u RESTIC_REPOSITORY \
+      -u RESTIC_REPOSITORY_COMMAND \
+      -u RESTIC_REPOSITORY_FILE \
+      HOME="$fake_home" \
+      XDG_CONFIG_HOME="$fake_home/.config" \
+      PATH="$fake_bin:$PATH" \
+      RESTIC_TEST_CALLS="$calls" \
+      "$ROOT_DIR/scripts/home-backup" "$@"
+  }
+
+  run_home_backup_with_repository() {
+    local repository="$1"
+    shift
+
+    env \
+      -u RESTIC_PASSWORD_COMMAND \
+      -u RESTIC_PASSWORD_FILE \
+      -u RESTIC_REPOSITORY_FILE \
+      HOME="$fake_home" \
+      XDG_CONFIG_HOME="$fake_home/.config" \
+      PATH="$fake_bin:$PATH" \
+      RESTIC_PASSWORD='not-a-real-password' \
+      RESTIC_REPOSITORY="$repository" \
+      RESTIC_TEST_CALLS="$calls" \
+      "$ROOT_DIR/scripts/home-backup" "$@"
+  }
+
+  run_home_backup_with_repository_file() {
+    local repository_file="$1"
+    shift
+
+    env \
+      -u RESTIC_PASSWORD_COMMAND \
+      -u RESTIC_PASSWORD_FILE \
+      -u RESTIC_REPOSITORY \
+      HOME="$fake_home" \
+      XDG_CONFIG_HOME="$fake_home/.config" \
+      PATH="$fake_bin:$PATH" \
+      RESTIC_PASSWORD='not-a-real-password' \
+      RESTIC_REPOSITORY_FILE="$repository_file" \
+      RESTIC_TEST_CALLS="$calls" \
+      "$ROOT_DIR/scripts/home-backup" "$@"
+  }
+
+  mkdir -p "$fake_home/.config/home-backup" "$fake_bin"
+  chmod 0700 "$fake_home/.config/home-backup"
+  printf '/media/backup/restic\n' > "$fake_home/.config/home-backup/repository"
+  printf 'not-a-real-password\n' > "$fake_home/.config/home-backup/password"
+  chmod 0600 \
+    "$fake_home/.config/home-backup/repository" \
+    "$fake_home/.config/home-backup/password"
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "repository=<%s> repository-file=<%s>" "${RESTIC_REPOSITORY-}" "${RESTIC_REPOSITORY_FILE-}" >> "$RESTIC_TEST_CALLS"' \
+    'printf "<%s>" "$@" >> "$RESTIC_TEST_CALLS"' \
+    'printf "\n" >> "$RESTIC_TEST_CALLS"' \
+    > "$fake_bin/restic"
+  chmod 0755 "$fake_bin/restic"
+
+  run_home_backup backup
+  run_home_backup prune
+
+  grep -q '<backup>' "$calls" || fail 'home-backup did not invoke restic backup'
+  grep -q "<$fake_home>" "$calls" || fail 'home-backup did not select HOME'
+  grep -q '<forget><--tag><home>' "$calls" ||
+    fail 'home-backup retention was not limited to the home tag'
+  grep -q "<--path><$fake_home>" "$calls" ||
+    fail 'home-backup did not limit snapshot selection to HOME'
+  grep -Fq 'repository=</media/backup/restic> repository-file=<>' "$calls" ||
+    fail 'home-backup did not pin its validated repository-file value'
+
+  if run_home_backup restore latest "$fake_home" 2>/dev/null; then
+    fail 'home-backup accepted HOME as a restore target'
+  fi
+
+  mkdir -m 0777 "$fixture/restore"
+  run_home_backup restore latest "$fixture/restore"
+  [ "$(stat -Lc '%a' "$fixture/restore")" = 700 ] ||
+    fail 'home-backup left the restore target accessible to other users'
+
+  printf '%s\n' "$fake_home/restic-repository" \
+    > "$fake_home/.config/home-backup/repository"
+  if run_home_backup backup 2>/dev/null; then
+    fail 'home-backup accepted a plain local repository inside HOME'
+  fi
+
+  printf 'local:%s\n' "$fake_home/restic-repository" \
+    > "$fake_home/.config/home-backup/repository"
+  if run_home_backup backup 2>/dev/null; then
+    fail 'home-backup accepted a local: repository inside HOME'
+  fi
+
+  if run_home_backup_with_repository "$fake_home/restic-repository" \
+    backup 2>/dev/null; then
+    fail 'home-backup accepted RESTIC_REPOSITORY inside HOME'
+  fi
+
+  local custom_repository_file="$fixture/custom-repository"
+  printf '%s\n' "$fake_home/restic-repository" > "$custom_repository_file"
+  chmod 0600 "$custom_repository_file"
+  if run_home_backup_with_repository_file "$custom_repository_file" \
+    backup 2>/dev/null; then
+    fail 'home-backup accepted RESTIC_REPOSITORY_FILE pointing inside HOME'
+  fi
+
+  printf '%s\n' '/media/backup/restic-custom' > "$custom_repository_file"
+  run_home_backup_with_repository_file "$custom_repository_file" backup
+  grep -Fq 'repository=</media/backup/restic-custom> repository-file=<>' "$calls" ||
+    fail 'home-backup passed RESTIC_REPOSITORY_FILE through to restic'
+
+  local nbsp=$'\u00a0'
+  printf '%s%s%s\n' "$nbsp" "$fake_home/restic-repository" "$nbsp" \
+    > "$fake_home/.config/home-backup/repository"
+  run_home_backup backup
+  grep -Fq \
+    "repository=<${nbsp}${fake_home}/restic-repository${nbsp}> repository-file=<>" \
+    "$calls" || fail 'home-backup let restic reinterpret Unicode whitespace'
+
+  printf '%s\n' 'sftp:backup@example.invalid:/srv/restic' \
+    > "$fake_home/.config/home-backup/repository"
+  run_home_backup backup
+
+  if run_home_backup init --repo "$fake_home/restic-repository" 2>/dev/null; then
+    fail 'home-backup accepted a separated --repo override'
+  fi
+  if run_home_backup init "--repo=$fake_home/restic-repository" 2>/dev/null; then
+    fail 'home-backup accepted a --repo= override'
+  fi
+  if run_home_backup init "-r$fake_home/restic-repository" 2>/dev/null; then
+    fail 'home-backup accepted an attached -r override'
+  fi
+  if run_home_backup init \
+    "--repository-file=$custom_repository_file" 2>/dev/null; then
+    fail 'home-backup accepted a --repository-file= override'
+  fi
+}
+
+test_installers() {
+  local system_root="$TEST_ROOT/system-root"
+  local fake_home="$TEST_ROOT/user-home"
+  local fake_bin="$TEST_ROOT/installer-bin"
+
+  SYSTEM_ROOT="$system_root" "$ROOT_DIR/system/install.sh" --skip-runtime >/dev/null
+  SYSTEM_ROOT="$system_root" "$ROOT_DIR/system/install.sh" --skip-runtime >/dev/null
+  [ -x "$system_root/usr/local/bin/battery-mode" ] || fail 'battery-mode was not installed'
+  [ -x "$system_root/usr/local/sbin/luks-trim" ] || fail 'luks-trim was not installed'
+  if find "$system_root" -name '*.backup.*' -print -quit | grep -q .; then
+    fail 'idempotent system install created a backup'
+  fi
+
+  mkdir -p "$fake_home" "$fake_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fake_bin/systemctl"
+  chmod 0755 "$fake_bin/systemctl"
+  printf '# test bashrc\n' > "$fake_home/.bashrc"
+  HOME="$fake_home" \
+    DOTFILES_DIR="$ROOT_DIR" \
+    PATH="$fake_bin:$PATH" \
+    "$ROOT_DIR/install.sh" >/dev/null
+  [ -L "$fake_home/.local/bin/home-backup" ] || fail 'home-backup was not linked'
+  [ -L "$fake_home/.config/systemd/user/home-backup.timer" ] ||
+    fail 'home-backup.timer was not linked'
+
+  assert_fails_with \
+    '--enable-ufw cannot be combined with --skip-runtime' \
+    "$ROOT_DIR/system/install.sh" --enable-ufw --skip-runtime
+  assert_fails_with \
+    '--root may only be specified once' \
+    "$ROOT_DIR/system/install.sh" \
+    --root "$TEST_ROOT/root-one" --root="$TEST_ROOT/root-two" --skip-runtime
+  assert_fails_with \
+    '--root must identify an offline root other than /' \
+    "$ROOT_DIR/system/install.sh" --root "$TEST_ROOT/../.." --skip-runtime
+  assert_fails_with \
+    'Do not combine the SYSTEM_ROOT test hook with --root' \
+    env SYSTEM_ROOT="$system_root" \
+    "$ROOT_DIR/system/install.sh" --root "$TEST_ROOT/production-root" --skip-runtime
+  assert_fails_with \
+    'SYSTEM_ROOT is test-only and requires --skip-runtime' \
+    env SYSTEM_ROOT="$system_root" "$ROOT_DIR/system/install.sh"
+  assert_fails_with \
+    'SYSTEM_ROOT test path must resolve below /tmp' \
+    env SYSTEM_ROOT=/var/tmp/dotfiles-test-root \
+    "$ROOT_DIR/system/install.sh" --skip-runtime
+
+  if ((EUID != 0)); then
+    assert_fails_with \
+      'Run as root: sudo ./system/install.sh' \
+      "$ROOT_DIR/system/install.sh" \
+      --root "$TEST_ROOT/production-root" --skip-runtime
+  else
+    "$ROOT_DIR/system/install.sh" \
+      --root "$TEST_ROOT/production-root" --skip-runtime >/dev/null
+    [ "$(stat -Lc '%u' "$TEST_ROOT/production-root/usr/local/sbin/luks-trim")" = 0 ] ||
+      fail 'production offline install did not create a root-owned helper'
+  fi
+}
+
+test_ufw_session_detection() {
+  local fixture="$TEST_ROOT/ufw-session"
+  local proc_root="$fixture/proc"
+  local status
+
+  write_process() {
+    local pid="$1"
+    local comm="$2"
+    local parent="$3"
+
+    mkdir -p "$proc_root/$pid"
+    printf '%s\n' "$comm" > "$proc_root/$pid/comm"
+    printf 'Name:\t%s\nPPid:\t%s\n' "$comm" "$parent" \
+      > "$proc_root/$pid/status"
+  }
+
+  write_process 300 bash 200
+  write_process 200 sudo 100
+  write_process 100 sshd-session 1
+  write_process 1 systemd 0
+  bash -c 'source "$1"; process_tree_has_sshd 300 "$2"' \
+    _ "$ROOT_DIR/system/install.sh" "$proc_root" ||
+    fail 'system installer did not detect sshd above sudo'
+
+  write_process 400 bash 1
+  status=0
+  bash -c 'source "$1"; process_tree_has_sshd 400 "$2"' \
+    _ "$ROOT_DIR/system/install.sh" "$proc_root" || status=$?
+  [ "$status" -eq 1 ] || fail "local process tree returned status $status"
+
+  status=0
+  bash -c 'source "$1"; process_tree_has_sshd 999 "$2"' \
+    _ "$ROOT_DIR/system/install.sh" "$proc_root" 2>/dev/null || status=$?
+  [ "$status" -eq 2 ] || fail "unreadable process tree returned status $status"
+
+  run_ssh_session_status() {
+    local process_status="$1"
+    local loginctl_result="$2"
+    local ssh_connection="${3:-}"
+
+    env \
+      -u SSH_CLIENT \
+      -u SSH_CONNECTION \
+      -u SSH_TTY \
+      PROCESS_TEST_STATUS="$process_status" \
+      LOGINCTL_TEST_RESULT="$loginctl_result" \
+      SSH_TEST_CONNECTION="$ssh_connection" \
+      bash -c '
+        source "$1"
+        process_tree_has_sshd() { return "$PROCESS_TEST_STATUS"; }
+        loginctl() {
+          [ "$#" -eq 4 ] &&
+            [ "$1" = show-session ] &&
+            [ "$2" = self ] &&
+            [ "$3" = --property=Remote ] &&
+            [ "$4" = --value ] || return 64
+          case "$LOGINCTL_TEST_RESULT" in
+            error) return 1 ;;
+            *) printf "%s\n" "$LOGINCTL_TEST_RESULT" ;;
+          esac
+        }
+        if [ -n "$SSH_TEST_CONNECTION" ]; then
+          SSH_CONNECTION="$SSH_TEST_CONNECTION"
+        fi
+        ssh_session_status
+      ' _ "$ROOT_DIR/system/install.sh"
+  }
+
+  run_ssh_session_status 1 yes ||
+    fail 'loginctl Remote=yes was not treated as remote'
+
+  status=0
+  run_ssh_session_status 2 no || status=$?
+  [ "$status" -eq 1 ] || fail "loginctl Remote=no returned status $status"
+
+  status=0
+  run_ssh_session_status 2 error || status=$?
+  [ "$status" -eq 2 ] || fail "loginctl failure returned status $status"
+
+  status=0
+  run_ssh_session_status 1 unknown || status=$?
+  [ "$status" -eq 2 ] || fail "unknown loginctl value returned status $status"
+
+  run_ssh_session_status 0 error ||
+    fail 'sshd ancestry did not bypass unavailable loginctl metadata'
+  run_ssh_session_status 2 error 'client server ports' ||
+    fail 'SSH_CONNECTION did not bypass unavailable loginctl metadata'
+
+  if bash -c '
+    source "$1"
+    ssh_session_status() { return 2; }
+    require_local_session_for_ufw
+  ' _ "$ROOT_DIR/system/install.sh" >/dev/null 2>&1; then
+    fail 'indeterminate SSH session did not fail closed'
+  fi
+}
+
+test_package_resolution() {
+  local requirement
+
+  command -v pacman >/dev/null 2>&1 || return
+  while IFS= read -r requirement; do
+    pacman -Sp --print-format '%n' "$requirement" >/dev/null 2>&1 ||
+      fail "package requirement is unavailable: $requirement"
+  done < "$ROOT_DIR/packages/arch.txt"
+}
+
+test_luks_trim() {
+  local source="$ROOT_DIR/system/bin/luks-trim"
+  local fixture="$TEST_ROOT/luks-trim"
+  local loaded="$fixture/luks-trim"
+  local fake_bin="$fixture/bin"
+  local empty_bin="$fixture/empty-bin"
+  local fstab="$fixture/fstab"
+  local cmdline="$fixture/cmdline"
+  local mkinitcpio_called="$fixture/mkinitcpio.called"
+  local original_cmdline="$fixture/original.cmdline"
+  local original_fstab="$fixture/original.fstab"
+  local rollback_mkinitcpio_count="$fixture/rollback-mkinitcpio.count"
+  local sbctl_state
+  local verify_called="$fixture/verify.called"
+
+  mkdir -p "$fake_bin" "$empty_bin"
+  sed \
+    -e "s|^readonly CMDLINE_FILE=.*|readonly CMDLINE_FILE='$cmdline'|" \
+    -e "s|^readonly FSTAB_FILE=.*|readonly FSTAB_FILE='$fstab'|" \
+    "$source" > "$loaded"
+
+  printf '%s\n' \
+    'UUID=test / btrfs rw,nodiscard,subvol=@ 0 0' \
+    'UUID=test /home btrfs rw,nodiscard,subvol=@home 0 0' \
+    > "$fstab"
+
+  LUKS_TEST_OPTIONS='rw,relatime' bash -c '
+    source "$1"
+    findmnt() {
+      case " $* " in
+        *" FSTYPE "*) printf "btrfs\n" ;;
+        *" OPTIONS "*) printf "%s\n" "$LUKS_TEST_OPTIONS" ;;
+        *" SOURCE "*) printf "UUID=test\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    periodic_discards_are_configured
+  ' _ "$loaded" || fail 'luks-trim rejected runtime without continuous discard'
+
+  if LUKS_TEST_OPTIONS='rw,discard=async' bash -c '
+    source "$1"
+    findmnt() {
+      case " $* " in
+        *" FSTYPE "*) printf "btrfs\n" ;;
+        *" OPTIONS "*) printf "%s\n" "$LUKS_TEST_OPTIONS" ;;
+        *" SOURCE "*) printf "UUID=test\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    periodic_discards_are_configured
+  ' _ "$loaded"; then
+    fail 'luks-trim accepted active continuous discard'
+  fi
+
+  printf '%s\n' \
+    'UUID=test / btrfs rw,nodiscard,subvol=@ 0 0' \
+    'UUID=test /home btrfs rw,subvol=@home 0 0' \
+    > "$fstab"
+  if LUKS_TEST_OPTIONS='rw,relatime' bash -c '
+    source "$1"
+    findmnt() {
+      case " $* " in
+        *" FSTYPE "*) printf "btrfs\n" ;;
+        *" OPTIONS "*) printf "%s\n" "$LUKS_TEST_OPTIONS" ;;
+        *" SOURCE "*) printf "UUID=test\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    periodic_discards_are_configured
+  ' _ "$loaded"; then
+    fail 'luks-trim accepted a persistent fstab entry without nodiscard'
+  fi
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    '[ "${1:-}" = --json ] && [ "${2:-}" = status ] || exit 64' \
+    'case "$SBCTL_TEST_STATE" in' \
+    '  disabled)' \
+    '    printf "%s\n" "{" "  \"setup_mode\": false," "  \"secure_boot\": false" "}"' \
+    '    ;;' \
+    '  invalid) printf "%s\n" "{}" ;;' \
+    '  malformed)' \
+    '    printf "%s\n" "not-json" "  \"secure_boot\": false" "  \"setup_mode\": false"' \
+    '    ;;' \
+    '  trailing)' \
+    '    printf "%s\n" "{\"secure_boot\": false, \"setup_mode\": false} trailing"' \
+    '    ;;' \
+    '  duplicate)' \
+    '    printf "%s\n" "{\"secure_boot\": false, \"secure_boot\": false, \"setup_mode\": false}"' \
+    '    ;;' \
+    '  wrong-type)' \
+    '    printf "%s\n" "{\"secure_boot\": \"false\", \"setup_mode\": false}"' \
+    '    ;;' \
+    '  error) exit 1 ;;' \
+    'esac' \
+    > "$fake_bin/sbctl"
+  chmod 0755 "$fake_bin/sbctl"
+
+  SBCTL_TEST_STATE=disabled PATH="$fake_bin:$PATH" bash -c \
+    'source "$1"; verify_ukis' _ "$loaded" >/dev/null ||
+    fail 'luks-trim rejected an explicit secure_boot=false state'
+  for sbctl_state in invalid malformed trailing duplicate wrong-type; do
+    if SBCTL_TEST_STATE="$sbctl_state" PATH="$fake_bin:$PATH" bash -c \
+      'source "$1"; verify_ukis' _ "$loaded" >/dev/null 2>&1; then
+      fail "luks-trim accepted invalid sbctl status: $sbctl_state"
+    fi
+  done
+  if SBCTL_TEST_STATE=error PATH="$fake_bin:$PATH" bash -c \
+    'source "$1"; verify_ukis' _ "$loaded" >/dev/null 2>&1; then
+    fail 'luks-trim ignored an sbctl status failure'
+  fi
+  if PATH="$empty_bin" /usr/bin/bash -c \
+    'source "$1"; verify_ukis' _ "$loaded" >/dev/null 2>&1; then
+    fail 'luks-trim ignored a missing sbctl command'
+  fi
+
+  printf '%s\n' \
+    'UUID=test / btrfs rw,nodiscard,subvol=@ 0 0' \
+    'UUID=test /home btrfs rw,nodiscard,subvol=@home 0 0' \
+    > "$fstab"
+  printf '%s\n' \
+    'rootflags=subvol=@ cryptdevice=PARTUUID=test-partuuid:root:allow-discards quiet' \
+    > "$cmdline"
+  LUKS_TEST_MKINITCPIO_CALLED="$mkinitcpio_called" \
+    LUKS_TEST_VERIFY_CALLED="$verify_called" \
+    bash -c '
+      source "$1"
+      verify_encrypt_hook() { return; }
+      verify_ukis() { : > "$LUKS_TEST_VERIFY_CALLED"; }
+      load_root_mapping() {
+        MAPPER_NAME=root
+        BACKING_DEVICE=/dev/test
+        CRYPT_FLAGS=
+      }
+      findmnt() {
+        case " $* " in
+          *" --mountpoint /boot "*) return ;;
+          *" FSTYPE "*) printf "btrfs\n" ;;
+          *" SOURCE "*) printf "UUID=test\n" ;;
+          *) return 1 ;;
+        esac
+      }
+      blkid() { printf "test-partuuid\n"; }
+      mkinitcpio() { : > "$LUKS_TEST_MKINITCPIO_CALLED"; }
+      prepare_discards
+    ' _ "$loaded" >/dev/null
+  [ -f "$mkinitcpio_called" ] ||
+    fail 'existing allow-discards did not trigger an inactive-runtime UKI rebuild'
+  [ -f "$verify_called" ] ||
+    fail 'existing allow-discards rebuild did not verify the UKIs'
+
+  printf '%s\n' \
+    'UUID=test / btrfs rw,discard=async,subvol=@ 0 0' \
+    'UUID=test /home btrfs rw,subvol=@home 0 0' \
+    > "$fstab"
+  printf '%s\n' \
+    'rootflags=subvol=@ cryptdevice=PARTUUID=test-partuuid:root quiet' \
+    > "$cmdline"
+  cp -- "$fstab" "$original_fstab"
+  cp -- "$cmdline" "$original_cmdline"
+
+  if LUKS_TEST_MKINITCPIO_COUNT="$rollback_mkinitcpio_count" bash -c '
+    source "$1"
+    verify_encrypt_hook() { return; }
+    verify_ukis() { return; }
+    load_root_mapping() {
+      MAPPER_NAME=root
+      BACKING_DEVICE=/dev/test
+      CRYPT_FLAGS=
+    }
+    findmnt() {
+      case " $* " in
+        *" --mountpoint /boot "*) return ;;
+        *" FSTYPE "*) printf "btrfs\n" ;;
+        *" SOURCE "*) printf "UUID=test\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    blkid() { printf "test-partuuid\n"; }
+    mkinitcpio() {
+      local count=0
+      if [ -f "$LUKS_TEST_MKINITCPIO_COUNT" ]; then
+        read -r count < "$LUKS_TEST_MKINITCPIO_COUNT"
+      fi
+      count=$((count + 1))
+      printf "%s\n" "$count" > "$LUKS_TEST_MKINITCPIO_COUNT"
+      [ "$count" -gt 1 ]
+    }
+    prepare_discards
+  ' _ "$loaded" >/dev/null 2>&1; then
+    fail 'luks-trim ignored an initial UKI rebuild failure'
+  fi
+  cmp -s -- "$fstab" "$original_fstab" ||
+    fail 'luks-trim did not restore fstab after a UKI rebuild failure'
+  cmp -s -- "$cmdline" "$original_cmdline" ||
+    fail 'luks-trim did not restore the kernel command line after a UKI rebuild failure'
+  assert_file_value "$rollback_mkinitcpio_count" 2
+}
+
+test_secure_boot_status_parser() {
+  local source="$ROOT_DIR/system/bin/secure-boot-check"
+  local parsed
+
+  parsed="$(bash -c \
+    'source "$1"; parse_sbctl_status "$2"' \
+    _ "$source" '{"secure_boot":true,"setup_mode":false}')" ||
+    fail 'secure-boot-check rejected a valid sbctl status document'
+  [ "$parsed" = 'true false' ] ||
+    fail "secure-boot-check parsed an unexpected state: $parsed"
+
+  if bash -c \
+    'source "$1"; parse_sbctl_status "$2"' \
+    _ "$source" $'not-json\n"secure_boot": true\n"setup_mode": false' \
+    >/dev/null 2>&1; then
+    fail 'secure-boot-check accepted a malformed sbctl status document'
+  fi
+  if bash -c \
+    'source "$1"; parse_sbctl_status "$2"' \
+    _ "$source" \
+    '{"secure_boot":true,"secure_boot":true,"setup_mode":false}' \
+    >/dev/null 2>&1; then
+    fail 'secure-boot-check accepted duplicate JSON keys'
+  fi
+}
+
+main() {
+  test_syntax
+  test_battery_modes
+  test_home_backup
+  test_installers
+  test_ufw_session_detection
+  test_package_resolution
+  test_luks_trim
+  test_secure_boot_status_parser
+
+  printf 'All dotfiles tests passed.\n'
+}
+
+main "$@"

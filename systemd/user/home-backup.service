@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up the home directory with restic
+ConditionPathExists=%E/home-backup/repository
+ConditionPathExists=%E/home-backup/password
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/home-backup backup
+Nice=10
+IOSchedulingClass=idle

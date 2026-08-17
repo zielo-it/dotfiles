@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: home-backup COMMAND [ARGUMENTS]
+
+Commands:
+  init                         Initialize the configured restic repository.
+  backup                       Back up the home directory.
+  snapshots                    List available snapshots.
+  check                        Check repository integrity.
+  restore SNAPSHOT TARGET [PATH...]
+                               Restore into a new or empty TARGET directory.
+  prune                        Apply the documented retention policy.
+
+Configuration lives in ~/.config/home-backup. See the repository README.
+EOF
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"
+}
+
+assert_private_file() {
+  local file="$1"
+  local mode
+  local owner
+
+  [ -f "$file" ] || die "Missing configuration file: $file"
+  [ ! -L "$file" ] || die "Refusing symlinked private file: $file"
+
+  owner="$(stat -Lc '%u' -- "$file")"
+  [ "$owner" = "$EUID" ] || die "$file must be owned by uid $EUID"
+
+  mode="$(stat -Lc '%a' -- "$file")"
+  if (((8#$mode & 8#077) != 0)); then
+    die "$file must not be accessible by group or others (use chmod 600)"
+  fi
+}
+
+configure_restic() {
+  [ -n "${HOME:-}" ] || die 'HOME is not set'
+  [ "$HOME" != / ] || die 'Refusing to use / as HOME'
+
+  readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/home-backup"
+  readonly REPOSITORY_FILE="$CONFIG_DIR/repository"
+  readonly PASSWORD_FILE="$CONFIG_DIR/password"
+  readonly EXCLUDES_FILE="$CONFIG_DIR/excludes"
+
+  if [ -z "${RESTIC_REPOSITORY:-}" ] && [ -z "${RESTIC_REPOSITORY_FILE:-}" ]; then
+    assert_private_file "$REPOSITORY_FILE"
+    export RESTIC_REPOSITORY_FILE="$REPOSITORY_FILE"
+  fi
+
+  if [ -z "${RESTIC_PASSWORD:-}" ] && [ -z "${RESTIC_PASSWORD_COMMAND:-}" ] &&
+    [ -z "${RESTIC_PASSWORD_FILE:-}" ]; then
+    assert_private_file "$PASSWORD_FILE"
+    export RESTIC_PASSWORD_FILE="$PASSWORD_FILE"
+  fi
+}
+
+assert_repository_outside_home() {
+  local repository="${RESTIC_REPOSITORY:-}"
+  local repository_file
+  local repository_prefix
+  local local_repository
+  local normalized_home
+  local normalized_repository
+  local repository_from_file=0
+  local repository_is_local=0
+
+  if [ -z "$repository" ]; then
+    repository_file="${RESTIC_REPOSITORY_FILE:-}"
+    [ -n "$repository_file" ] || die 'Restic repository is not configured'
+    [ "$repository_file" != - ] ||
+      die 'Cannot validate a repository location read from standard input'
+    [ -f "$repository_file" ] || die "Missing repository file: $repository_file"
+    [ -r "$repository_file" ] || die "Repository file is not readable: $repository_file"
+
+    repository_prefix=
+    LC_ALL=C IFS= read -r -N 3 repository_prefix < "$repository_file" || true
+    case "$repository_prefix" in
+      $'\xff\xfe'* | $'\xfe\xff'*)
+        require_command iconv
+        if ! repository="$(iconv -f UTF-16 -t UTF-8 -- "$repository_file")"; then
+          die "Cannot decode repository file: $repository_file"
+        fi
+        ;;
+      *)
+        if ! repository="$(<"$repository_file")"; then
+          die "Cannot read repository file: $repository_file"
+        fi
+        repository="${repository#$'\xef\xbb\xbf'}"
+        ;;
+    esac
+    repository="${repository#"${repository%%[![:space:]]*}"}"
+    repository="${repository%"${repository##*[![:space:]]}"}"
+    [ -n "$repository" ] || die "Repository file is empty: $repository_file"
+    repository_from_file=1
+  fi
+
+  case "$repository" in
+    local:*)
+      local_repository="${repository#local:}"
+      repository_is_local=1
+      ;;
+    *)
+      if ! [[ "$repository" =~ ^[[:alpha:]][[:alnum:]+.-]*: ]]; then
+        local_repository="$repository"
+        repository_is_local=1
+      fi
+      ;;
+  esac
+
+  if ((repository_is_local)); then
+    [ -n "$local_repository" ] || die 'Local restic repository path is empty'
+    if ! normalized_home="$(realpath -m -- "$HOME")"; then
+      die 'Cannot normalize HOME'
+    fi
+    [ "$normalized_home" != / ] || die 'Refusing to use / as HOME'
+    if ! normalized_repository="$(realpath -m -- "$local_repository")"; then
+      die 'Cannot normalize local restic repository path'
+    fi
+
+    if [ "$normalized_repository" = "$normalized_home" ] ||
+      [[ "$normalized_repository" == "$normalized_home/"* ]]; then
+      die 'Refusing a local restic repository inside HOME'
+    fi
+  fi
+
+  if ((repository_from_file)); then
+    # Restic trims repository-file contents again. Pin the exact value checked
+    # here so it cannot be reinterpreted or changed between validation and use.
+    export RESTIC_REPOSITORY="$repository"
+    unset RESTIC_REPOSITORY_FILE
+  fi
+}
+
+assert_no_repository_override() {
+  local argument
+
+  for argument in "$@"; do
+    case "$argument" in
+      --repo | --repo=* | --repository-file | --repository-file=*)
+        die 'Repository overrides are not accepted; use the configured repository'
+        ;;
+      -r | -r?*)
+        die 'Repository overrides are not accepted; use the configured repository'
+        ;;
+    esac
+  done
+}
+
+lock_repository() {
+  local owner
+  local mode
+
+  mkdir -p -m 0700 -- "$CONFIG_DIR"
+  [ ! -L "$CONFIG_DIR" ] || die "Refusing symlinked configuration directory: $CONFIG_DIR"
+  owner="$(stat -Lc '%u' -- "$CONFIG_DIR")"
+  [ "$owner" = "$EUID" ] || die "$CONFIG_DIR must be owned by uid $EUID"
+  mode="$(stat -Lc '%a' -- "$CONFIG_DIR")"
+  if (((8#$mode & 8#077) != 0)); then
+    die "$CONFIG_DIR must not be accessible by group or others (use chmod 700)"
+  fi
+  exec 9> "$CONFIG_DIR/backup.lock"
+  flock -n 9 || die 'Another home-backup process is already running'
+}
+
+backup_home() {
+  local -a args=(
+    backup
+    --one-file-system
+    --exclude-caches
+    --tag home
+    --exclude "$HOME/.cache"
+    --exclude "$HOME/.local/share/Trash"
+    --exclude "$HOME/.local/share/wallpapers"
+    --exclude "$HOME/.snapshots"
+    --exclude "$CONFIG_DIR"
+  )
+
+  if [ -f "$EXCLUDES_FILE" ]; then
+    args+=(--exclude-file "$EXCLUDES_FILE")
+  fi
+
+  restic "${args[@]}" -- "$HOME"
+}
+
+restore_snapshot() {
+  local snapshot="${1:-}"
+  local target="${2:-}"
+  local normalized_home
+  local normalized_target
+  local path
+  local -a args
+
+  [ -n "$snapshot" ] && [ -n "$target" ] || {
+    usage >&2
+    exit 2
+  }
+  shift 2
+
+  [ ! -L "$target" ] || die "Refusing symlinked restore target: $target"
+  normalized_home="$(realpath -m -- "$HOME")"
+  normalized_target="$(realpath -m -- "$target")"
+  [ "$normalized_target" != / ] || die 'Refusing to restore over /'
+  [ "$normalized_target" != "$normalized_home" ] || die 'Refusing to restore over HOME'
+
+  if [ -d "$normalized_target" ] &&
+    [ -n "$(find "$normalized_target" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    die "Restore target is not empty: $normalized_target"
+  fi
+  mkdir -p -m 0700 -- "$normalized_target"
+  chmod 0700 -- "$normalized_target"
+
+  args=(
+    restore "$snapshot"
+    --tag home
+    --path "$HOME"
+    --target "$normalized_target"
+  )
+  for path in "$@"; do
+    args+=(--include "$path")
+  done
+  restic "${args[@]}"
+}
+
+main() {
+  local command="${1:-}"
+
+  case "$command" in
+    -h | --help | help)
+      usage
+      exit
+      ;;
+    init | backup | snapshots | check | restore | prune) ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+
+  assert_no_repository_override "$@"
+
+  require_command restic
+  require_command flock
+  configure_restic
+  assert_repository_outside_home
+  lock_repository
+
+  case "$command" in
+    init) restic init "$@" ;;
+    backup)
+      [ "$#" -eq 0 ] || die 'backup does not accept positional arguments'
+      backup_home
+      ;;
+    snapshots) restic snapshots --tag home --path "$HOME" "$@" ;;
+    check) restic check "$@" ;;
+    restore) restore_snapshot "$@" ;;
+    prune)
+      [ "$#" -eq 0 ] || die 'prune does not accept positional arguments'
+      restic forget \
+        --tag home \
+        --path "$HOME" \
+        --keep-daily 7 \
+        --keep-weekly 5 \
+        --keep-monthly 12 \
+        --keep-yearly 3 \
+        --prune
+      ;;
+  esac
+}
+
+main "$@"

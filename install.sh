@@ -54,6 +54,11 @@ ensure_line_if_file_exists() {
 main() {
   link_file "$DOTFILES_DIR/aliases/.aliases" "$HOME/.aliases"
   link_file "$DOTFILES_DIR/scripts/wallpaper" "$HOME/.local/bin/wallpaper"
+  link_file "$DOTFILES_DIR/scripts/lock-screen" "$HOME/.local/bin/lock-screen"
+  link_file "$DOTFILES_DIR/scripts/home-backup" "$HOME/.local/bin/home-backup"
+  link_file \
+    "$DOTFILES_DIR/scripts/update-package-snapshot" \
+    "$HOME/.local/bin/update-package-snapshot"
 
   link_file "$DOTFILES_DIR/i3/config" "$HOME/.config/i3/config"
   link_file "$DOTFILES_DIR/i3status/config" "$HOME/.config/i3status/config"
@@ -70,8 +75,22 @@ main() {
   link_file "$DOTFILES_DIR/xdg-desktop-portal/portals.conf" "$HOME/.config/xdg-desktop-portal/portals.conf"
   link_file "$DOTFILES_DIR/xsettingsd/xsettingsd.conf" "$HOME/.xsettingsd"
   link_file "$DOTFILES_DIR/xprofile/.xprofile" "$HOME/.xprofile"
+  link_file \
+    "$DOTFILES_DIR/systemd/user/home-backup.service" \
+    "$HOME/.config/systemd/user/home-backup.service"
+  link_file \
+    "$DOTFILES_DIR/systemd/user/home-backup.timer" \
+    "$HOME/.config/systemd/user/home-backup.timer"
 
   ensure_line_if_file_exists "$HOME/.bashrc" "$ALIASES_LINE"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl --user daemon-reload 2>/dev/null; then
+      log "Reloaded user systemd units."
+    else
+      log "User systemd is unavailable; run 'systemctl --user daemon-reload' after login."
+    fi
+  fi
 
   log "Done ✔"
   log "Reload i3 with Mod+Shift+r."

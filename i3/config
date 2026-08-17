@@ -31,7 +31,7 @@ bindsym $mod+d exec --no-startup-id $menu
 bindsym $mod+e exec --no-startup-id thunar
 bindsym $mod+w exec --no-startup-id firefox
 bindsym $mod+Shift+w exec --no-startup-id ~/.local/bin/wallpaper next
-bindsym $mod+Shift+x exec --no-startup-id i3lock -c 1e1e2e
+bindsym $mod+Shift+x exec --no-startup-id ~/.local/bin/lock-screen
 bindsym Print exec --no-startup-id flameshot gui
 bindsym $mod+Shift+s exec --no-startup-id flameshot gui
 bindsym $mod+Print exec --no-startup-id flameshot full -c
@@ -130,6 +130,9 @@ bindsym $mod+r mode "resize"
 
 exec_always --no-startup-id setxkbmap -layout pl
 exec_always --no-startup-id xset r rate 250 35
+exec_always --no-startup-id xset s 300 0
+exec_always --no-startup-id xset +dpms
+exec_always --no-startup-id xset dpms 0 0 600
 exec_always --no-startup-id ~/dotfiles/scripts/brightness-status sync
 exec_always --no-startup-id ~/.local/bin/wallpaper watch
 exec_always --no-startup-id ~/dotfiles/scripts/apply-dark-mode
@@ -139,7 +142,7 @@ exec --no-startup-id dunst
 exec --no-startup-id picom --config ~/.config/picom/picom.conf
 exec --no-startup-id /usr/bin/touchegg
 exec --no-startup-id /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1
-exec --no-startup-id xss-lock --transfer-sleep-lock -- i3lock --nofork -c 1e1e2e
+exec --no-startup-id xss-lock --transfer-sleep-lock -- ~/.local/bin/lock-screen
 
 bar {
     position top

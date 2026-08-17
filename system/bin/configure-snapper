@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly SNAPPER_SETTINGS='NUMBER_CLEANUP=yes NUMBER_LIMIT=50 NUMBER_LIMIT_IMPORTANT=10 TIMELINE_CREATE=yes TIMELINE_CLEANUP=yes TIMELINE_LIMIT_HOURLY=10 TIMELINE_LIMIT_DAILY=10 TIMELINE_LIMIT_WEEKLY=0 TIMELINE_LIMIT_MONTHLY=10 TIMELINE_LIMIT_QUARTERLY=0 TIMELINE_LIMIT_YEARLY=10'
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+log() {
+  printf '%s\n' "$*"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"
+}
+
+configure_one() {
+  local name="$1"
+  local subvolume="$2"
+  local filesystem
+  local configured_subvolume
+
+  filesystem="$(findmnt -nro FSTYPE --target "$subvolume")" ||
+    die "Cannot identify the filesystem containing $subvolume"
+  [ "$filesystem" = btrfs ] || die "$subvolume is not on Btrfs"
+
+  if snapper --no-dbus -c "$name" get-config >/dev/null 2>&1; then
+    configured_subvolume="$(
+      snapper --no-dbus -c "$name" --csvout get-config |
+        awk -F, '$1 == "SUBVOLUME" { print $2; exit }'
+    )"
+    [ "$configured_subvolume" = "$subvolume" ] ||
+      die "Snapper configuration '$name' points to '$configured_subvolume', expected '$subvolume'"
+    log "Snapper configuration already exists: $name ($subvolume)"
+  else
+    if [ -e "$subvolume/.snapshots" ]; then
+      die "$subvolume/.snapshots already exists without a Snapper configuration; resolve it manually"
+    fi
+    snapper --no-dbus -c "$name" create-config "$subvolume"
+    log "Created Snapper configuration: $name ($subvolume)"
+  fi
+
+  snapper --no-dbus -c "$name" set-config "$SNAPPER_SETTINGS"
+  log "Applied retention policy to Snapper configuration: $name"
+}
+
+main() {
+  [ "$#" -eq 0 ] || die 'configure-snapper does not accept arguments'
+  [ "$EUID" -eq 0 ] || die 'Run as root: sudo configure-snapper'
+
+  require_command findmnt
+  require_command snapper
+
+  configure_one root /
+  configure_one home /home
+}
+
+main "$@"

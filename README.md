@@ -13,13 +13,38 @@ sudo ./system/install.sh
 ```
 
 The system installer copies root-owned Xorg and wireless regulatory-domain
-configuration into `/etc`. The user installer creates symbolic links in the
-home directory. If a managed target already exists with different contents,
-it is preserved with a `.backup.YYYYMMDD-HHMMSS` suffix.
+configuration into `/etc`, installs the administration helpers in
+`/usr/local`, configures the two Snapper profiles, and enables the required
+services and maintenance timers. It deliberately leaves UFW inactive on a
+fresh setup until `--enable-ufw` is passed, and leaves TRIM
+through LUKS unchanged unless it is requested explicitly. The user installer
+creates symbolic links in the home directory, including the screen-lock and
+backup helpers and the optional backup timer. If a managed target already
+exists with different contents, it is preserved with a
+`.backup.YYYYMMDD-HHMMSS` suffix.
+
+Review the firewall rules and run `sudo ./system/install.sh --enable-ufw`
+locally when enabling UFW for the first time; do not use that flag over SSH.
+The installer refuses activation when it detects SSH or cannot verify a local
+session. Without the flag, `ufw.service` is enabled but not started. To prepare
+an offline root, use `sudo ./system/install.sh --root /mnt`; add
+`--skip-runtime` when only the managed files should be installed.
 
 ## Arch Linux packages
 
-The list contains only packages from the official repositories.
+`packages/arch.txt` is the sorted, curated installation manifest. It contains
+only packages from the official repositories and lists the required non-base
+tools directly, even when another package currently pulls one in transitively.
+
+`packages/arch-explicit.txt` is a point-in-time inventory of every official
+repository package explicitly installed on the current laptop. It is kept as
+an audit aid rather than an installation input: the snapshot also includes
+old tools and graphics drivers that are not needed by this Intel-only setup.
+Refresh it after intentionally changing the installed package set:
+
+```bash
+~/.local/bin/update-package-snapshot
+```
 
 ## Random wallpapers
 
@@ -94,25 +119,122 @@ middle click. The rules are loaded automatically at the next login.
 
 ## Touchpad gestures
 
-Touchégg handles multi-touch gestures in the X11 session. Enable its system
-service once after installing the Arch Linux packages:
+Firefox handles two-finger navigation natively, while Touchégg handles the
+three-finger workspace gestures in the X11 session. The system installer
+enables the Touchégg service; verify it with:
 
 ```bash
-sudo systemctl enable --now touchegg.service
+systemctl status touchegg.service
 ```
 
 Log out and back in to start the Touchégg client through i3. The configured
 gestures operate on the currently focused display:
 
+- Two-finger swipe right in Firefox: back
+- Two-finger swipe left in Firefox: forward
 - Three-finger swipe left: next workspace
 - Three-finger swipe right: previous workspace
 
+The X11 session exports `MOZ_USE_XINPUT2=1` for Firefox. Log out and back in
+before testing the gestures.
+
+## Battery charging profiles
+
+`battery-mode` switches the hardware charging thresholds without installing
+TLP. These profiles are charging limits, not CPU or performance modes;
+`power-profiles-daemon` remains responsible for the latter.
+
+| Mode | Start charging | Stop charging | Intended use |
+| --- | ---: | ---: | --- |
+| `desktop` | 75% | 80% | Mostly connected to AC power |
+| `laptop` | 0% | 100% | Maximum capacity away from a charger |
+
+Inspect or switch the profile with:
+
+```bash
+battery-mode status
+sudo battery-mode desktop
+sudo battery-mode laptop
+```
+
+The helper discovers the battery, validates both threshold interfaces, writes
+the values in a safe order, and verifies the result. It attempts to restore
+the previous pair if a partial update fails. Check `battery-mode status` once
+after a reboot to learn whether the firmware retains the selected thresholds;
+no persistence service is installed automatically.
+
+## Session locking and lid policy
+
+The X11 idle timer locks the session after 5 minutes and powers the displays
+off after 10 minutes. `Mod+Shift+x`, `loginctl lock-session`, and suspend all
+use the same `i3lock` wrapper. The wrapper correctly releases logind's sleep
+delay only after the lock window exists, avoiding an unlocked suspend/resume
+race.
+
+The installed logind drop-in suspends on lid close both on battery and external
+power, while ignoring the lid when docked. Reboot after changing this file.
+Verify the active X11 timers and the lock path with:
+
+```bash
+xset q
+loginctl lock-session
+```
+
+## Home backups
+
+`home-backup` is a conservative frontend for restic. It includes documents,
+SSH keys, application profiles, and the rest of `$HOME`, while excluding
+caches, Trash, downloaded wallpapers, local snapshots, and its own credential
+directory. Configure an external or off-site repository without putting its
+location or password in Git:
+
+```bash
+install -d -m 700 ~/.config/home-backup
+install -m 600 /dev/null ~/.config/home-backup/repository
+install -m 600 /dev/null ~/.config/home-backup/password
+printf '%s\n' '/path/to/restic-repository' \
+  > ~/.config/home-backup/repository
+read -rsp 'Restic password: ' RESTIC_BACKUP_PASSWORD; printf '\n'
+printf '%s\n' "$RESTIC_BACKUP_PASSWORD" \
+  > ~/.config/home-backup/password
+unset RESTIC_BACKUP_PASSWORD
+
+home-backup init
+home-backup backup
+home-backup snapshots
+home-backup check
+```
+
+An optional `~/.config/home-backup/excludes` file can add machine-specific
+restic exclude patterns. Test a small restore into a new directory before
+enabling automation:
+
+```bash
+restore_dir="$(mktemp -d /tmp/restic-restore.XXXXXX)"
+home-backup restore latest "$restore_dir" "$HOME/Documents"
+# Inspect the restored files, then remove this temporary directory.
+systemctl --user enable --now home-backup.timer
+```
+
+The installed timer runs daily with a randomized delay, but remains disabled
+until explicitly enabled. `home-backup prune` is also deliberately manual; it
+keeps 7 daily, 5 weekly, 12 monthly, and 3 yearly snapshots. Store the restic
+password separately in a password manager or recovery kit because the helper
+excludes its private configuration from the backup. Before `home-backup init`
+for a local external target, confirm that the target is mounted and that the
+repository path is not inside `$HOME`; restic will otherwise create a valid
+repository on the system disk. The helper refuses recognizable local
+repository paths inside `$HOME`. Btrfs snapshots and this dotfiles repository
+are not substitutes for this independent backup.
+
 ## Reinstallation notes
 
-The current ThinkPad has additional system configuration that is not yet
-applied by `install.sh` or `system/install.sh`. Use this section as a manual
-post-install checklist. Discover device identifiers on each installation;
-never copy old UUIDs, PARTUUIDs, serial numbers, or key material from Git.
+The installers now reproduce the portable configuration and routine services
+described below. Disk creation, Secure Boot enrollment, recovery operations,
+and backup credentials remain manual because they depend on the new machine or
+can make it unbootable if guessed. Discover device identifiers on each
+installation; never copy old UUIDs, PARTUUIDs, serial numbers, or key material
+from Git.
 
 ### Installation baseline
 
@@ -130,8 +252,9 @@ LightDM, NetworkManager, PipeWire, Bluetooth, `power-profiles-daemon`, and
 UFW. Set the timezone to `Europe/Warsaw` and enable automatic time
 synchronization. Do not run TLP alongside `power-profiles-daemon`.
 
-UFW was selected during installation but its runtime state was not captured in
-the original setup notes. Verify it instead of assuming it is active:
+The system installer enables NetworkManager, Bluetooth, LightDM, UFW,
+Touchégg, `power-profiles-daemon`, and systemd time synchronization. Verify
+UFW rather than assuming that its current rules are appropriate:
 
 ```bash
 systemctl is-enabled ufw.service
@@ -140,9 +263,12 @@ sudo ufw status verbose
 
 ### Snapshots and maintenance timers
 
-Keep separate Snapper configurations for `/` and `/home`, with timeline and
-cleanup enabled. The `snap-pac` package creates `pre` and `post` snapshots
-around `pacman` transactions. Verify the setup after reinstalling:
+The system installer keeps separate Snapper configurations for `/` and
+`/home`, with timeline and cleanup enabled. It creates a missing configuration
+only when the corresponding `.snapshots` path does not already exist; an
+ambiguous pre-existing path causes a safe failure for manual inspection. The
+`snap-pac` package creates `pre` and `post` snapshots around `pacman`
+transactions. Verify the setup after reinstalling:
 
 ```bash
 sudo snapper list-configs
@@ -151,16 +277,15 @@ sudo snapper -c home list
 systemctl status snapper-timeline.timer snapper-cleanup.timer
 ```
 
-The confirmed retention is 10 hourly, 10 daily, no weekly, 10 monthly, no
-quarterly, and 10 yearly snapshots. The numeric limits are 50 regular and 10
-important snapshots.
+The installer applies the confirmed retention: 10 hourly, 10 daily, no
+weekly, 10 monthly, no quarterly, and 10 yearly snapshots. The numeric limits
+are 50 regular and 10 important snapshots.
 
-Enable weekly package-cache cleanup and a monthly Btrfs scrub:
+It also enables weekly package-cache cleanup and a monthly Btrfs scrub. Check
+their state with:
 
 ```bash
-sudo pacman -S --needed pacman-contrib
-sudo systemctl enable --now paccache.timer
-sudo systemctl enable --now btrfs-scrub@-.timer
+systemctl status paccache.timer btrfs-scrub@-.timer
 ```
 
 The scrub of `/` covers `/home` because both are subvolumes of the same Btrfs
@@ -170,67 +295,67 @@ Enable `fstrim.timer` only after completing the LUKS test below.
 ### TRIM through LUKS
 
 With the `encrypt` mkinitcpio hook, periodic TRIM reaches the encrypted root
-only when its `cryptdevice` parameter in `/etc/kernel/cmdline` ends with
-`:allow-discards`. Preserve the generated PARTUUID and the remaining kernel
-arguments; the relevant form is:
+only when its `cryptdevice` parameter in `/etc/kernel/cmdline` includes
+`allow-discards`. The helper discovers the active mapper and its current
+PARTUUID, requires an exact match with the existing argument, preserves every
+other kernel argument, and creates timestamped backups before changing it. To
+keep this periodic rather than continuous, it also adds `nodiscard` to every
+Btrfs entry for this filesystem in `/etc/fstab`; modern Btrfs otherwise
+defaults to asynchronous continuous discard. The relevant kernel argument is:
 
 ```text
 cryptdevice=PARTUUID=<ROOT_PARTUUID>:root:allow-discards
 ```
 
-Rebuild the UKIs:
+Inspect the current state, then make this explicit opt-in either through the
+installer flag or the installed helper:
 
 ```bash
-sudo mkinitcpio -P
+sudo luks-trim status
+sudo ./system/install.sh --allow-luks-discards
+# Equivalent after the normal installation:
+sudo luks-trim prepare
 ```
 
-If Secure Boot is already configured, verify the result and do not reboot
-until both UKIs in `/boot/EFI/Linux` are reported as signed:
-
-```bash
-sudo sbctl verify
-```
-
-Then reboot:
+`prepare` is intentionally limited to the documented Btrfs, `encrypt`-hook,
+UKI setup. It refuses to work unless `/boot` is mounted, writes the kernel
+command line and fstab through atomic replacement, and runs `mkinitcpio -P`.
+With Secure Boot active, it also requires both `arch-linux.efi` and
+`arch-linux-lts.efi` to verify. A build or signature failure restores the old
+command line and fstab, then rebuilds the old UKIs. It never reboots and it
+never enables the timer at this stage. Review its output, then reboot manually
+only after both UKIs were built successfully:
 
 ```bash
 sudo reboot
 ```
 
-After rebooting, verify both the dm-crypt flag and a manual TRIM before
-relying on `fstrim.timer`:
+After rebooting, the second phase verifies that the active dm-crypt mapping
+accepts discards and that continuous Btrfs discard is disabled. It then runs a
+manual TRIM against `/` and `/boot` and only afterwards enables `fstrim.timer`:
 
 ```bash
-sudo cryptsetup status root
-sudo fstrim -av
+sudo luks-trim verify
 ```
 
-`cryptsetup status root` should contain `flags: discards`, and `fstrim` should
-report both `/` and `/boot`. Allowing discards can reveal approximate
-information about allocated blocks, so keep this an explicit choice rather
-than a hidden installer default. See the
+Allowing discards can reveal approximate information about allocated blocks,
+so it remains an explicit choice rather than a hidden installer default. See
+the
 [ArchWiki dm-crypt notes][dmcrypt-trim]
 for the security trade-off and alternative configurations.
 
-After both checks pass, enable and verify the weekly timer together with the
-other maintenance timers:
+Verify the resulting weekly timer together with the other maintenance timers:
 
 ```bash
-sudo systemctl enable --now fstrim.timer
 systemctl list-timers --all | grep -E \
   'fstrim|paccache|snapper|btrfs-scrub'
 ```
 
 ### Secure Boot and firmware
 
-Until their installation is automated, install the supporting tools manually:
-
-```bash
-sudo pacman -S --needed sbctl sbsigntools
-```
-
 The working system uses systemd-boot and signed UKIs with keys created by
-`sbctl`. The active UEFI databases retain the Lenovo and Microsoft
+`sbctl`; all supporting tools are in `packages/arch.txt`. The active UEFI
+databases retain the Lenovo and Microsoft
 certificates alongside the machine's own PK, KEK, and db certificates. These
 files are signed:
 
@@ -241,12 +366,12 @@ files are signed:
 
 Unsigned `/boot/vmlinuz-*` files are expected because the firmware starts the
 signed UKIs in `/boot/EFI/Linux`, not those raw kernel files. Check the chain
-after kernel, systemd, or fwupd updates:
+after kernel, systemd, or fwupd updates with the read-only helper, which
+verifies the expected bootloader copies and both UKIs without treating the raw
+kernels as boot targets:
 
 ```bash
-sudo sbctl status
-sudo sbctl verify
-sudo bootctl status | head -n 12
+sudo secure-boot-check
 ```
 
 The private keys live in `/var/lib/sbctl` and must never enter this
@@ -287,40 +412,14 @@ Review the proposed devices and releases before running `fwupdmgr update`,
 keep AC power connected during firmware updates, and verify their result with
 `fwupdmgr get-history` after rebooting.
 
-## Future configurations
+## Remaining manual work
 
-The remaining items are deliberately not automated yet. They form a roadmap
-for making a fresh installation easier to reproduce and recover without
-embedding machine-specific identifiers or secrets in this repository.
+The portable post-install configuration is automated, but destructive disk
+provisioning and trust changes deliberately remain operator-driven. They need
+machine-specific choices and a tested recovery path rather than unattended
+defaults.
 
-### Battery modes
-
-Add an optional helper for switching the hardware charging thresholds between
-two profiles:
-
-| Mode | Start charging | Stop charging | Intended use |
-| --- | ---: | ---: | --- |
-| `desktop` | 75% | 80% | Mostly connected to AC power |
-| `laptop` | 0% | 100% | Maximum capacity away from a charger |
-
-The helper should first verify that both
-`/sys/class/power_supply/BAT0/charge_control_*_threshold` files exist, apply
-the values in a safe order, and read them back after writing. It should also
-check whether the firmware retains the selected mode across a reboot before
-adding any persistence mechanism. Keep `power-profiles-daemon` as the power
-manager; threshold switching alone is not a reason to install TLP alongside
-it.
-
-### Backups
-
-Configure an encrypted `restic` or `borg` repository on external or off-site
-storage. Back up the important parts of `$HOME`, including documents, SSH
-keys, and application profiles, and test restoring a small selection of files.
-Btrfs snapshots and this dotfiles repository make local rollback convenient,
-but neither protects against SSD failure, loss, or theft. Repository
-credentials and private keys must remain outside Git.
-
-### Recovery path
+### Recovery validation
 
 Boot the `linux-lts` entry from systemd-boot at least once and verify
 graphics, audio, and networking so it is a tested fallback rather than only
@@ -341,27 +440,41 @@ merely changing Btrfs's default subvolume does not select a different root at
 boot. The runbook must either restore the chosen root snapshot as `@`, or
 update `rootflags` and rebuild and sign the UKIs before rebooting.
 
-### Session lifecycle
+Do not turn this into an automatic rollback script until it has been exercised
+from the recovery drive. In particular, mounting the ESP at `/boot` is a hard
+precondition for rebuilding UKIs; otherwise `mkinitcpio` can write into an
+ordinary directory on the root filesystem.
 
-The current i3 configuration already provides a manual lock shortcut and uses
-`xss-lock` to lock before suspend. A future revision should make the idle
-timeout and screen power-off timing explicit, define the lid-close policy, and
-verify locking both through `loginctl lock-session` and across suspend/resume.
+### Secure Boot enrollment
 
-### Reinstallation automation
+The scripts verify an established Secure Boot chain but do not create, rotate,
+or enroll keys. A clean reinstall must generate a new set because
+`/var/lib/sbctl` is intentionally not backed up, preserve the required Lenovo
+and Microsoft certificates, enroll the new keys in the correct order, sign
+the bootloader, UKIs, and fwupd application, and verify their signatures with
+`sbctl verify` before enabling Secure Boot. After enabling it, run
+`secure-boot-check`. Keep this interactive until a model-specific key-rotation
+runbook has been tested end to end.
 
-Extend the bootstrap process with a portable description of the LUKS/Btrfs
-layout and an explicit, idempotent list of required services and timers. This
-should cover NetworkManager, Bluetooth, LightDM, UFW, Touchégg, power
-profiles, automatic time synchronization, Snapper creation and cleanup,
-weekly TRIM and package-cache cleanup, and the monthly Btrfs scrub.
+### Disk provisioning
 
-The automation must discover the new root PARTUUID, offer `:allow-discards`
-as an explicit opt-in, rebuild and sign the UKIs, and verify that TRIM reaches
-the encrypted root when selected. Add supporting packages such as
-`pacman-contrib`, `sbctl`, and `sbsigntools` to `packages/arch.txt`. Keep
-concrete device identifiers, backup credentials, LUKS material, and Secure
-Boot private keys out of the portable configuration.
+Archinstall still owns partition creation, LUKS enrollment, Btrfs subvolume
+creation, ESP mounting, and zram setup. A future provisioning layer may
+describe the logical layout, but it must discover device identifiers at run
+time and require a final destructive confirmation. UUIDs, backup credentials,
+LUKS material, and Secure Boot keys must stay outside this repository.
+
+## Verification
+
+The repository includes hardware-independent regression checks for script and
+configuration syntax, package ordering, both battery transitions, backup
+repository confinement and restore safeguards, SSH/UFW session detection,
+fail-closed Secure Boot status parsing, LUKS rollback, and idempotent staged
+installation:
+
+```bash
+./tests/run
+```
 
 ## Key i3 shortcuts
 

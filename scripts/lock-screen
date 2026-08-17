@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly LOCK_COLOR=1e1e2e
+
+has_sleep_lock() {
+  [[ "${XSS_SLEEP_LOCK_FD:-}" =~ ^[0-9]+$ ]] &&
+    [ -e "/proc/$$/fd/$XSS_SLEEP_LOCK_FD" ]
+}
+
+if has_sleep_lock; then
+  kill_locker() {
+    pkill -xu "$EUID" -x i3lock "$@"
+  }
+
+  trap kill_locker TERM INT
+
+  # i3lock forks only after its window is ready. Do not let that child inherit
+  # logind's delay-inhibitor FD; close our copy immediately afterwards so the
+  # suspend can proceed without racing an unlocked screen.
+  i3lock -c "$LOCK_COLOR" {XSS_SLEEP_LOCK_FD}<&-
+  exec {XSS_SLEEP_LOCK_FD}<&-
+
+  while kill_locker -0 2>/dev/null; do
+    sleep 0.5
+  done
+else
+  exec i3lock --nofork -c "$LOCK_COLOR"
+fi

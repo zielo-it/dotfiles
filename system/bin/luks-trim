@@ -1,0 +1,564 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly CMDLINE_FILE=/etc/kernel/cmdline
+readonly FSTAB_FILE=/etc/fstab
+ROOT_SOURCE=
+ROOT_DEVICE=
+MAPPER_NAME=
+CRYPT_STATUS=
+BACKING_DEVICE=
+CRYPT_FLAGS=
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+log() {
+  printf '%s\n' "$*"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: luks-trim status|prepare|verify
+
+  status   Show whether discards reach the active encrypted root.
+  prepare  Add allow-discards to the matching cryptdevice argument and
+           rebuild the UKIs. This is an explicit privacy trade-off.
+  verify   After reboot, test TRIM on / and /boot, then enable fstrim.timer.
+
+prepare never reboots. Read its output and verify both UKIs before doing so.
+EOF
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"
+}
+
+load_root_mapping() {
+  local status
+
+  ROOT_SOURCE="$(findmnt -nro SOURCE --target /)" || return 1
+  ROOT_DEVICE="${ROOT_SOURCE%%\[*}"
+
+  case "$ROOT_DEVICE" in
+    /dev/mapper/*)
+      MAPPER_NAME="${ROOT_DEVICE##*/}"
+      ;;
+    /dev/dm-*)
+      require_command dmsetup
+      MAPPER_NAME="$(dmsetup info -c --noheadings -o name "$ROOT_DEVICE" | xargs)"
+      [ -n "$MAPPER_NAME" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+
+  status="$(cryptsetup status "$MAPPER_NAME" 2>/dev/null)" || return 1
+  grep -Eq '^[[:space:]]*type:[[:space:]]+LUKS' <<< "$status" || return 1
+
+  CRYPT_STATUS="$status"
+  BACKING_DEVICE="$(awk '$1 == "device:" { print $2; exit }' <<< "$status")"
+  CRYPT_FLAGS="$(awk '$1 == "flags:" { $1=""; sub(/^[[:space:]]+/, ""); print; exit }' <<< "$status")"
+  [ -n "$BACKING_DEVICE" ] || die "Cannot identify the device below $MAPPER_NAME"
+}
+
+discards_are_active() {
+  local flag
+
+  for flag in $CRYPT_FLAGS; do
+    [ "$flag" = discards ] && return 0
+  done
+  return 1
+}
+
+cmdline_allows_discards() {
+  grep -Eq '(^|[[:space:]])cryptdevice=[^[:space:]]*:(allow-discards|[^[:space:]]*,allow-discards)(,|[[:space:]]|$)' \
+    "$CMDLINE_FILE"
+}
+
+parse_sbctl_status() {
+  python3 -c '
+import json
+import sys
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def reject_constant(value):
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+try:
+    status = json.load(
+        sys.stdin,
+        object_pairs_hook=unique_object,
+        parse_constant=reject_constant,
+    )
+    if not isinstance(status, dict):
+        raise ValueError("status is not a JSON object")
+    secure_boot = status["secure_boot"]
+    setup_mode = status["setup_mode"]
+    if type(secure_boot) is not bool or type(setup_mode) is not bool:
+        raise ValueError("Secure Boot states are not booleans")
+except (KeyError, TypeError, ValueError):
+    raise SystemExit(1)
+
+print(
+    "true" if secure_boot else "false",
+    "true" if setup_mode else "false",
+)
+' <<< "$1"
+}
+
+verify_ukis() {
+  local extra
+  local parsed_status
+  local uki
+  local secure_boot
+  local setup_mode
+  local status
+  local -a ukis=(
+    /boot/EFI/Linux/arch-linux.efi
+    /boot/EFI/Linux/arch-linux-lts.efi
+  )
+
+  if ! command -v sbctl >/dev/null 2>&1; then
+    printf 'Cannot verify UKIs: sbctl is not installed.\n' >&2
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'Cannot verify UKIs: python3 is not installed.\n' >&2
+    return 1
+  fi
+  if ! status="$(sbctl --json status 2>/dev/null)"; then
+    printf 'Cannot verify UKIs: sbctl status failed.\n' >&2
+    return 1
+  fi
+  if ! parsed_status="$(parse_sbctl_status "$status" 2>/dev/null)"; then
+    printf 'Cannot verify UKIs: sbctl returned an invalid status document.\n' >&2
+    return 1
+  fi
+  IFS=' ' read -r secure_boot setup_mode extra <<< "$parsed_status"
+  if [ -n "${extra:-}" ]; then
+    printf 'Cannot verify UKIs: parsed sbctl status is ambiguous.\n' >&2
+    return 1
+  fi
+
+  case "$secure_boot" in
+    false)
+      log 'Secure Boot is explicitly disabled; skipping UKI signature verification.'
+      return
+      ;;
+    true) ;;
+    *)
+      printf 'Cannot verify UKIs: cannot parse a unique secure_boot state from sbctl.\n' >&2
+      return 1
+      ;;
+  esac
+  if [ "$setup_mode" != false ]; then
+    printf 'Cannot verify UKIs: sbctl did not report setup_mode=false.\n' >&2
+    return 1
+  fi
+
+  for uki in "${ukis[@]}"; do
+    if [ ! -f "$uki" ]; then
+      printf 'Cannot verify UKI: missing %s.\n' "$uki" >&2
+      return 1
+    fi
+    if ! sbctl verify "$uki"; then
+      printf 'UKI signature verification failed: %s.\n' "$uki" >&2
+      return 1
+    fi
+  done
+}
+
+restore_cmdline_and_ukis() {
+  local backup="$1"
+  local fstab_backup="$2"
+  local content
+  local fstab_content
+
+  log "Restoring $CMDLINE_FILE from $backup"
+  if ! content="$(< "$backup")"; then
+    printf 'CRITICAL: cannot read the kernel command-line backup. Do not reboot.\n' >&2
+    return 1
+  fi
+  if ! write_cmdline "$content"; then
+    printf 'CRITICAL: restoring the previous kernel command line failed. Do not reboot.\n' >&2
+    return 1
+  fi
+  if ! fstab_content="$(< "$fstab_backup")" ||
+    ! write_atomic_preserving_metadata "$FSTAB_FILE" "$fstab_content"; then
+    printf 'CRITICAL: restoring the previous fstab failed. Do not reboot.\n' >&2
+    return 1
+  fi
+  if ! mkinitcpio -P; then
+    printf 'CRITICAL: restoring the previous UKIs failed. Do not reboot.\n' >&2
+    return 1
+  fi
+  if ! verify_ukis; then
+    printf 'CRITICAL: restored UKI signature verification failed. Do not reboot.\n' >&2
+    return 1
+  fi
+}
+
+write_atomic_preserving_metadata() {
+  local file="$1"
+  local content="$2"
+  local directory
+  local temporary
+
+  directory="$(dirname -- "$file")"
+  temporary="$(mktemp --tmpdir="$directory" .dotfiles-update.XXXXXX)"
+  if ! printf '%s\n' "$content" > "$temporary" ||
+    ! chmod --reference="$file" "$temporary" ||
+    ! chown --reference="$file" "$temporary" ||
+    ! mv -- "$temporary" "$file"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+}
+
+write_cmdline() {
+  write_atomic_preserving_metadata "$CMDLINE_FILE" "$1"
+}
+
+prepare_periodic_btrfs_discards() {
+  local root_spec
+  local temporary
+  local awk_status=0
+
+  [ -f "$FSTAB_FILE" ] || die "Missing $FSTAB_FILE"
+  [ "$(findmnt -nro FSTYPE --target /)" = btrfs ] ||
+    die 'Periodic-discard preparation currently requires a Btrfs root'
+  root_spec="$(findmnt -snro SOURCE --target /)"
+  [[ "$root_spec" = UUID=* ]] ||
+    die 'The Btrfs root entry in fstab must use UUID=... for safe matching'
+
+  temporary="$(mktemp)"
+  awk -v source="$root_spec" '
+    BEGIN { changed = 0; matched = 0 }
+    /^[[:space:]]*#/ || NF < 4 { print; next }
+    $1 == source && $3 == "btrfs" {
+      matched++
+      n = split($4, options, ",")
+      rebuilt = ""
+      has_nodiscard = 0
+      for (i = 1; i <= n; i++) {
+        if (options[i] == "discard" || options[i] == "discard=sync" || options[i] == "discard=async") {
+          changed = 1
+          continue
+        }
+        if (options[i] == "nodiscard") has_nodiscard = 1
+        rebuilt = rebuilt (rebuilt == "" ? "" : ",") options[i]
+      }
+      if (!has_nodiscard) {
+        rebuilt = rebuilt (rebuilt == "" ? "" : ",") "nodiscard"
+        changed = 1
+      }
+      $4 = rebuilt
+    }
+    { print }
+    END {
+      if (matched == 0) exit 42
+      if (changed == 0) exit 43
+    }
+  ' "$FSTAB_FILE" > "$temporary" || awk_status="$?"
+  case "$awk_status" in
+    0) ;;
+    43)
+      rm -f -- "$temporary"
+      log 'All Btrfs entries for the root filesystem already use nodiscard.'
+      return
+      ;;
+    *)
+      rm -f -- "$temporary"
+      die "Cannot update the Btrfs root entries in $FSTAB_FILE"
+      ;;
+  esac
+
+  if ! write_atomic_preserving_metadata "$FSTAB_FILE" "$(< "$temporary")"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  rm -f -- "$temporary"
+  log "Configured nodiscard for all Btrfs subvolumes of $root_spec"
+}
+
+fstab_has_periodic_btrfs_discards() {
+  local root_spec
+
+  [ -f "$FSTAB_FILE" ] || return 1
+  root_spec="$(findmnt -snro SOURCE --target /)" || return 1
+  [[ "$root_spec" = UUID=* ]] || return 1
+
+  awk -v source="$root_spec" '
+    BEGIN { matched = 0; invalid = 0 }
+    /^[[:space:]]*#/ || NF < 4 { next }
+    $1 == source && $3 == "btrfs" {
+      matched++
+      n = split($4, options, ",")
+      has_nodiscard = 0
+      for (i = 1; i <= n; i++) {
+        if (options[i] == "discard" || options[i] == "discard=sync" || options[i] == "discard=async") invalid = 1
+        if (options[i] == "nodiscard") has_nodiscard = 1
+      }
+      if (!has_nodiscard) invalid = 1
+    }
+    END { exit !(matched > 0 && invalid == 0) }
+  ' "$FSTAB_FILE"
+}
+
+periodic_discards_are_configured() {
+  local root_fstype
+  local options
+
+  root_fstype="$(findmnt -nro FSTYPE --target /)"
+  [ "$root_fstype" = btrfs ] || return 1
+
+  options="$(findmnt -nro OPTIONS --target /)" || return 1
+  [ -n "$options" ] || return 1
+  case ",$options," in
+    *,discard,* | *,discard=sync,* | *,discard=async,*) return 1 ;;
+  esac
+
+  # Btrfs only reports active discard modes through findmnt. An absent discard
+  # option is the runtime equivalent of nodiscard, so verify persistence in
+  # fstab separately instead of requiring findmnt to print literal nodiscard.
+  fstab_has_periodic_btrfs_discards
+}
+
+verify_encrypt_hook() {
+  local hooks_line
+
+  [ -f /etc/mkinitcpio.conf ] || die 'Missing /etc/mkinitcpio.conf'
+  hooks_line="$(sed -nE 's/^[[:space:]]*HOOKS=\((.*)\)[[:space:]]*$/\1/p' /etc/mkinitcpio.conf)"
+  [ -n "$hooks_line" ] || die 'Cannot parse HOOKS from /etc/mkinitcpio.conf'
+  case " $hooks_line " in
+    *' encrypt '*) ;;
+    *' sd-encrypt '*) die 'This helper supports the encrypt hook, not sd-encrypt' ;;
+    *) die 'The active mkinitcpio configuration does not contain the encrypt hook' ;;
+  esac
+
+  grep -RqsE '^[[:space:]]*default_uki=' /etc/mkinitcpio.d/*.preset ||
+    die 'No UKI-producing mkinitcpio preset was found'
+}
+
+prepare_discards() {
+  local partuuid
+  local cmdline
+  local token
+  local value
+  local identifier
+  local token_mapper
+  local options
+  local extra
+  local option
+  local index=-1
+  local count=0
+  local backup
+  local fstab_backup
+  local fstab_content
+  local new_cmdline
+  local allow_discards_present=0
+  local -a tokens
+  local -a option_list
+
+  verify_encrypt_hook
+  load_root_mapping || die 'The active root is not a supported LUKS mapping'
+  [ -f "$CMDLINE_FILE" ] || die "Missing $CMDLINE_FILE"
+  findmnt -rn --mountpoint /boot >/dev/null ||
+    die '/boot is not mounted; refusing to rebuild UKIs into an ordinary directory'
+
+  partuuid="$(blkid -s PARTUUID -o value "$BACKING_DEVICE")"
+  [ -n "$partuuid" ] || die "Cannot read PARTUUID for $BACKING_DEVICE"
+
+  [ "$(wc -l < "$CMDLINE_FILE")" -le 1 ] ||
+    die "$CMDLINE_FILE must contain exactly one logical line"
+  cmdline="$(< "$CMDLINE_FILE")"
+  [ -n "$cmdline" ] || die "$CMDLINE_FILE is empty"
+  read -r -a tokens <<< "$cmdline"
+  for token_index in "${!tokens[@]}"; do
+    if [[ "${tokens[$token_index]}" = cryptdevice=* ]]; then
+      index="$token_index"
+      count=$((count + 1))
+    fi
+  done
+  ((count == 1)) || die "Expected exactly one cryptdevice argument in $CMDLINE_FILE; found $count"
+
+  token="${tokens[$index]}"
+  value="${token#cryptdevice=}"
+  IFS=: read -r identifier token_mapper options extra <<< "$value"
+  [ -z "$extra" ] || die "Unsupported cryptdevice syntax: $token"
+  [[ "$identifier" = PARTUUID=* ]] || die "Expected cryptdevice to use PARTUUID, found: $identifier"
+  [ "${identifier#PARTUUID=}" = "$partuuid" ] ||
+    die "cryptdevice PARTUUID does not match the active LUKS device"
+  [ "$token_mapper" = "$MAPPER_NAME" ] ||
+    die "cryptdevice mapper '$token_mapper' does not match active mapper '$MAPPER_NAME'"
+
+  if [ -n "$options" ]; then
+    IFS=, read -r -a option_list <<< "$options"
+  else
+    option_list=()
+  fi
+  for option in "${option_list[@]}"; do
+    if [ "$option" = allow-discards ]; then
+      allow_discards_present=1
+      break
+    fi
+  done
+
+  if ((allow_discards_present)); then
+    if discards_are_active; then
+      if ! fstab_has_periodic_btrfs_discards; then
+        fstab_backup="$FSTAB_FILE.backup.$(date +%Y%m%d-%H%M%S)"
+        cp --preserve=mode,ownership,timestamps -- "$FSTAB_FILE" "$fstab_backup"
+        prepare_periodic_btrfs_discards
+        log "Updated $FSTAB_FILE (backup: $fstab_backup)"
+        log 'Reboot to apply nodiscard, then run: sudo luks-trim verify'
+        return
+      fi
+      log 'allow-discards is present and active. Run: sudo luks-trim verify'
+      return
+    fi
+    new_cmdline="$cmdline"
+  else
+    if [ -n "$options" ]; then
+      options="$options,allow-discards"
+    else
+      options=allow-discards
+    fi
+    tokens[$index]="cryptdevice=$identifier:$token_mapper:$options"
+    new_cmdline="${tokens[*]}"
+  fi
+
+  backup="$CMDLINE_FILE.backup.$(date +%Y%m%d-%H%M%S)"
+  fstab_backup="$FSTAB_FILE.backup.$(date +%Y%m%d-%H%M%S)"
+  cp --preserve=mode,ownership,timestamps -- "$CMDLINE_FILE" "$backup"
+  cp --preserve=mode,ownership,timestamps -- "$FSTAB_FILE" "$fstab_backup"
+  if ! prepare_periodic_btrfs_discards; then
+    die "Failed to configure periodic Btrfs discard; backups are $backup and $fstab_backup"
+  fi
+  if ((!allow_discards_present)) && ! write_cmdline "$new_cmdline"; then
+    fstab_content="$(< "$fstab_backup")"
+    if ! write_atomic_preserving_metadata "$FSTAB_FILE" "$fstab_content"; then
+      die "Kernel command line was unchanged, but fstab rollback failed. Restore $fstab_backup before rebooting"
+    fi
+    die 'Failed to update the kernel command line; fstab was restored'
+  fi
+  if ((allow_discards_present)); then
+    log "$CMDLINE_FILE already contains allow-discards (backup: $backup)"
+  else
+    log "Updated $CMDLINE_FILE (backup: $backup)"
+  fi
+  log "Prepared $FSTAB_FILE for periodic discard (backup: $fstab_backup)"
+
+  if ! mkinitcpio -P; then
+    if restore_cmdline_and_ukis "$backup" "$fstab_backup"; then
+      die 'UKI rebuild failed; the previous kernel command line and UKIs were restored'
+    fi
+    die 'UKI rebuild failed and rollback also failed. Do not reboot'
+  fi
+  if ! verify_ukis; then
+    if restore_cmdline_and_ukis "$backup" "$fstab_backup"; then
+      die 'UKI verification failed; the previous kernel command line and UKIs were restored'
+    fi
+    die 'UKI verification failed and rollback also failed. Do not reboot'
+  fi
+
+  log 'UKIs rebuilt successfully. Do not enable fstrim.timer yet.'
+  log 'Review the build output, reboot, then run: sudo luks-trim verify'
+}
+
+verify_discards() {
+  load_root_mapping || die 'The active root is not a supported LUKS mapping'
+  discards_are_active || die 'Discards are not active on the root mapping; run prepare and reboot first'
+  cmdline_allows_discards || die "$CMDLINE_FILE does not contain allow-discards"
+  findmnt -rn --mountpoint /boot >/dev/null || die '/boot is not mounted'
+  periodic_discards_are_configured ||
+    die 'Periodic Btrfs discard is not safely configured; remove runtime discard options, ensure every root-filesystem subvolume uses nodiscard in fstab, and reboot'
+
+  fstrim --verbose /
+  fstrim --verbose /boot
+  systemctl enable --now fstrim.timer
+  systemctl is-enabled --quiet fstrim.timer || die 'fstrim.timer was not enabled'
+  systemctl is-active --quiet fstrim.timer || die 'fstrim.timer is not active'
+
+  log 'TRIM reached / and /boot; fstrim.timer is enabled and active.'
+}
+
+show_status() {
+  if ! load_root_mapping; then
+    log 'Encrypted root: no supported active LUKS mapping detected'
+    return
+  fi
+
+  printf 'Root source: %s\nMapper: %s\nBacking device: %s\nFlags: %s\n' \
+    "$ROOT_SOURCE" "$MAPPER_NAME" "$BACKING_DEVICE" "${CRYPT_FLAGS:-none}"
+  if discards_are_active; then
+    log 'Runtime discard state: active'
+  else
+    log 'Runtime discard state: inactive'
+  fi
+  if [ -f "$CMDLINE_FILE" ] && cmdline_allows_discards; then
+    log 'Kernel command line: allow-discards present'
+  else
+    log 'Kernel command line: allow-discards absent'
+  fi
+  if systemctl is-enabled --quiet fstrim.timer 2>/dev/null; then
+    log 'fstrim.timer: enabled'
+  else
+    log 'fstrim.timer: disabled'
+  fi
+}
+
+main() {
+  local command="${1:-status}"
+
+  if [ "$#" -gt 1 ]; then
+    usage >&2
+    exit 2
+  fi
+  case "$command" in
+    status | prepare | verify) ;;
+    -h | --help)
+      usage
+      exit
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+
+  [ "$EUID" -eq 0 ] || die "Run as root: sudo luks-trim $command"
+  require_command cryptsetup
+  require_command findmnt
+  require_command systemctl
+
+  case "$command" in
+    status) show_status ;;
+    prepare)
+      require_command blkid
+      require_command mkinitcpio
+      require_command python3
+      prepare_discards
+      ;;
+    verify)
+      require_command fstrim
+      verify_discards
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

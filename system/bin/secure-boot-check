@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+require_file() {
+  [ -f "$1" ] || die "Missing expected Secure Boot file: $1"
+}
+
+parse_sbctl_status() {
+  python3 -c '
+import json
+import sys
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def reject_constant(value):
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+try:
+    status = json.load(
+        sys.stdin,
+        object_pairs_hook=unique_object,
+        parse_constant=reject_constant,
+    )
+    if not isinstance(status, dict):
+        raise ValueError("status is not a JSON object")
+    secure_boot = status["secure_boot"]
+    setup_mode = status["setup_mode"]
+    if type(secure_boot) is not bool or type(setup_mode) is not bool:
+        raise ValueError("Secure Boot states are not booleans")
+except (KeyError, TypeError, ValueError):
+    raise SystemExit(1)
+
+print(
+    "true" if secure_boot else "false",
+    "true" if setup_mode else "false",
+)
+' <<< "$1"
+}
+
+main() {
+  local extra
+  local file
+  local parsed_status
+  local secure_boot
+  local setup_mode
+  local status
+  local -a required_files=(
+    /boot/EFI/BOOT/BOOTX64.EFI
+    /boot/EFI/systemd/systemd-bootx64.efi
+    /boot/EFI/Linux/arch-linux.efi
+    /boot/EFI/Linux/arch-linux-lts.efi
+  )
+  local -a update_source_files=(
+    /usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed
+    /boot/EFI/systemd/fwupdx64.efi
+    /usr/lib/fwupd/efi/fwupdx64.efi.signed
+  )
+
+  [ "$#" -eq 0 ] || die 'secure-boot-check does not accept arguments'
+  [ "$EUID" -eq 0 ] || die 'Run as root: sudo secure-boot-check'
+  command -v sbctl >/dev/null 2>&1 || die 'Install sbctl first'
+  command -v findmnt >/dev/null 2>&1 || die 'Missing command: findmnt'
+  command -v python3 >/dev/null 2>&1 || die 'Install python first'
+  findmnt -rn --mountpoint /boot >/dev/null || die '/boot is not mounted; refusing to inspect an ordinary directory'
+
+  status="$(sbctl --json status)" || die 'Cannot read Secure Boot status from sbctl'
+  printf '%s\n' "$status"
+  parsed_status="$(parse_sbctl_status "$status" 2>/dev/null)" ||
+    die 'sbctl returned an invalid status document'
+  IFS=' ' read -r secure_boot setup_mode extra <<< "$parsed_status"
+  [ -z "${extra:-}" ] || die 'Parsed sbctl status is ambiguous'
+  [ "$setup_mode" = false ] ||
+    die 'UEFI is in Setup Mode'
+  [ "$secure_boot" = true ] ||
+    die 'Secure Boot is not enabled'
+
+  for file in "${required_files[@]}"; do
+    require_file "$file"
+    sbctl verify "$file"
+  done
+
+  for file in "${update_source_files[@]}"; do
+    require_file "$file"
+    sbctl verify "$file"
+  done
+
+  if command -v bootctl >/dev/null 2>&1; then
+    bootctl status | sed -n '1,12p'
+  fi
+
+  printf 'Secure Boot status and expected signed boot files verified.\n'
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
