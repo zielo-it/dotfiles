@@ -55,6 +55,12 @@ main() {
   link_file "$DOTFILES_DIR/aliases/.aliases" "$HOME/.aliases"
   link_file "$DOTFILES_DIR/scripts/wallpaper" "$HOME/.local/bin/wallpaper"
   link_file "$DOTFILES_DIR/scripts/lock-screen" "$HOME/.local/bin/lock-screen"
+  link_file \
+    "$DOTFILES_DIR/scripts/fullscreen-idle-inhibit" \
+    "$HOME/.local/bin/fullscreen-idle-inhibit"
+  link_file \
+    "$DOTFILES_DIR/scripts/xss-lock-supervisor" \
+    "$HOME/.local/bin/xss-lock-supervisor"
   link_file "$DOTFILES_DIR/scripts/home-backup" "$HOME/.local/bin/home-backup"
   link_file \
     "$DOTFILES_DIR/scripts/update-package-snapshot" \

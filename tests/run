@@ -61,6 +61,113 @@ test_syntax() {
   LC_ALL=C sort -cu "$ROOT_DIR/packages/arch-explicit.txt"
 }
 
+test_fullscreen_idle_inhibit() {
+  local helper="$ROOT_DIR/scripts/fullscreen-idle-inhibit"
+  local visible_workspace='[{"id":10,"visible":true}]'
+  local hidden_workspace='[{"id":10,"visible":false}]'
+  local fixture="$TEST_ROOT/fullscreen-idle-inhibit"
+  local fake_bin="$fixture/bin"
+  local runtime_dir="$fixture/runtime"
+  local calls="$fixture/calls"
+
+  printf '%s\n' \
+    '{"type":"root","nodes":[{"id":10,"type":"workspace",' \
+    '"fullscreen_mode":1,"nodes":[{"type":"con","fullscreen_mode":1}]}]}' \
+    | "$helper" check "$visible_workspace" ||
+    fail 'fullscreen inhibitor missed a full-screen window on a visible workspace'
+
+  if printf '%s\n' \
+    '{"type":"root","nodes":[{"id":10,"type":"workspace",' \
+    '"fullscreen_mode":1,"nodes":[{"type":"con","fullscreen_mode":1}]}]}' \
+    | "$helper" check "$hidden_workspace"; then
+    fail 'fullscreen inhibitor accepted a full-screen window on a hidden workspace'
+  fi
+
+  if printf '%s\n' \
+    '{"type":"root","nodes":[{"id":10,"type":"workspace",' \
+    '"fullscreen_mode":1,"nodes":[{"type":"con","fullscreen_mode":0}]}]}' \
+    | "$helper" check "$visible_workspace"; then
+    fail 'fullscreen inhibitor mistook the workspace itself for a full-screen window'
+  fi
+
+  mkdir -p "$fake_bin" "$runtime_dir"
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'case "$*" in' \
+    '  "-t get_workspaces") printf "%s\n" "[{\"id\":10,\"visible\":true}]" ;;' \
+    '  "-t get_tree") printf "%s\n" "{\"type\":\"root\",\"nodes\":[{\"id\":10,\"type\":\"workspace\",\"nodes\":[{\"type\":\"con\",\"fullscreen_mode\":1}]}]}" ;;' \
+    '  *) exit 64 ;;' \
+    'esac' \
+    > "$fake_bin/i3-msg"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    '[ "${FULLSCREEN_TEST_LOCKED:-no}" = yes ]' \
+    > "$fake_bin/pgrep"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'case "$*" in' \
+    '  "s reset") printf "%s\n" "xset s reset" >> "$FULLSCREEN_TEST_CALLS" ;;' \
+    '  *) exit 64 ;;' \
+    'esac' \
+    > "$fake_bin/xset"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'kill -TERM "$PPID"' \
+    > "$fake_bin/sleep"
+  chmod 0755 "$fake_bin"/*
+
+  XDG_RUNTIME_DIR="$runtime_dir" \
+    PATH="$fake_bin:$PATH" \
+    FULLSCREEN_IDLE_INHIBIT_INTERVAL=1 \
+    FULLSCREEN_TEST_CALLS="$calls" \
+    "$helper" watch
+
+  grep -Fxq 'xset s reset' "$calls" ||
+    fail 'fullscreen inhibitor did not reset the X11 idle timer'
+
+  : > "$calls"
+  FULLSCREEN_TEST_LOCKED=yes \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    PATH="$fake_bin:$PATH" \
+    FULLSCREEN_IDLE_INHIBIT_INTERVAL=1 \
+    FULLSCREEN_TEST_CALLS="$calls" \
+    "$helper" watch
+  [ ! -s "$calls" ] ||
+    fail 'fullscreen inhibitor changed timers while the screen was locked'
+}
+
+test_xss_lock_supervisor() {
+  local helper="$ROOT_DIR/scripts/xss-lock-supervisor"
+  local fixture="$TEST_ROOT/xss-lock-supervisor"
+  local fake_bin="$fixture/bin"
+  local runtime_dir="$fixture/runtime"
+  local calls="$fixture/xss-lock-calls"
+
+  mkdir -p "$fake_bin" "$runtime_dir"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'count=0' \
+    '[ ! -f "$XSS_LOCK_TEST_CALLS" ] || read -r count < "$XSS_LOCK_TEST_CALLS"' \
+    'printf "%s\n" "$((count + 1))" > "$XSS_LOCK_TEST_CALLS"' \
+    'exit 1' \
+    > "$fake_bin/xss-lock"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'read -r count < "$XSS_LOCK_TEST_CALLS"' \
+    '[ "$count" -lt 2 ] || kill -TERM "$PPID"' \
+    > "$fake_bin/sleep"
+  chmod 0755 "$fake_bin"/*
+
+  XDG_RUNTIME_DIR="$runtime_dir" \
+    PATH="$fake_bin:$PATH" \
+    XSS_LOCK_RESTART_DELAY=1 \
+    XSS_LOCK_TEST_CALLS="$calls" \
+    "$helper"
+
+  assert_file_value "$calls" 2
+}
+
 test_battery_modes() {
   local fixture="$TEST_ROOT/power_supply"
   local battery="$fixture/BAT0"
@@ -256,6 +363,10 @@ test_installers() {
     DOTFILES_DIR="$ROOT_DIR" \
     PATH="$fake_bin:$PATH" \
     "$ROOT_DIR/install.sh" >/dev/null
+  [ -L "$fake_home/.local/bin/fullscreen-idle-inhibit" ] ||
+    fail 'fullscreen-idle-inhibit was not linked'
+  [ -L "$fake_home/.local/bin/xss-lock-supervisor" ] ||
+    fail 'xss-lock-supervisor was not linked'
   [ -L "$fake_home/.local/bin/home-backup" ] || fail 'home-backup was not linked'
   [ -L "$fake_home/.config/systemd/user/home-backup.timer" ] ||
     fail 'home-backup.timer was not linked'
@@ -629,6 +740,8 @@ test_secure_boot_status_parser() {
 
 main() {
   test_syntax
+  test_fullscreen_idle_inhibit
+  test_xss_lock_supervisor
   test_battery_modes
   test_home_backup
   test_installers

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly DEFAULT_RESET_INTERVAL=30
+readonly reset_interval="${FULLSCREEN_IDLE_INHIBIT_INTERVAL:-$DEFAULT_RESET_INTERVAL}"
+
+tree_has_fullscreen_on_visible_workspace() {
+  local workspaces_json="$1"
+
+  python3 -c '
+import json
+import sys
+
+
+def descendants(node):
+    yield node
+    for child in node.get("nodes", []) + node.get("floating_nodes", []):
+        yield from descendants(child)
+
+
+visible_workspace_ids = {
+    workspace["id"]
+    for workspace in json.loads(sys.argv[1])
+    if workspace.get("visible") is True
+}
+tree = json.load(sys.stdin)
+
+sys.exit(
+    0
+    if any(
+        node.get("fullscreen_mode", 0) != 0
+        for workspace in descendants(tree)
+        if workspace.get("type") == "workspace"
+        and workspace.get("id") in visible_workspace_ids
+        for child in workspace.get("nodes", []) + workspace.get("floating_nodes", [])
+        for node in descendants(child)
+        if node.get("type") in {"con", "floating_con"}
+    )
+    else 1
+)
+' "$workspaces_json"
+}
+
+visible_fullscreen_is_active() {
+  local workspaces_json
+
+  workspaces_json="$(i3-msg -t get_workspaces 2>/dev/null)" || return 1
+  i3-msg -t get_tree 2>/dev/null \
+    | tree_has_fullscreen_on_visible_workspace "$workspaces_json" 2>/dev/null
+}
+
+reset_idle_timer() {
+  # xss-lock 0.4 treats SIGHUP as a shutdown request, so reset the X server's
+  # shared screen-saver/DPMS timer directly.
+  xset s reset >/dev/null 2>&1 || true
+}
+
+screen_is_locked() {
+  pgrep -u "$EUID" -x i3lock >/dev/null 2>&1
+}
+
+watch_fullscreen() {
+  local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+  [[ "$reset_interval" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'fullscreen-idle-inhibit: interval must be a positive integer\n' >&2
+    return 2
+  }
+
+  for command in flock i3-msg pgrep python3 xset; do
+    command -v "$command" >/dev/null 2>&1 || {
+      printf 'fullscreen-idle-inhibit: required command not found: %s\n' \
+        "$command" >&2
+      return 1
+    }
+  done
+
+  [ -d "$runtime_dir" ] || {
+    printf 'fullscreen-idle-inhibit: runtime directory not found: %s\n' \
+      "$runtime_dir" >&2
+    return 1
+  }
+
+  exec 9>"$runtime_dir/fullscreen-idle-inhibit.lock"
+  flock -n 9 || return 0
+
+  trap 'exit 0' HUP INT TERM
+
+  while :; do
+    if visible_fullscreen_is_active && ! screen_is_locked; then
+      reset_idle_timer
+    fi
+    sleep "$reset_interval" 9>&-
+  done
+}
+
+case "${1:-watch}" in
+  check)
+    [ "$#" -eq 2 ] || {
+      printf 'Usage: %s check WORKSPACES_JSON\n' "$0" >&2
+      exit 2
+    }
+    tree_has_fullscreen_on_visible_workspace "$2"
+    ;;
+  watch) watch_fullscreen ;;
+  *)
+    printf 'Usage: %s [watch|check]\n' "$0" >&2
+    exit 2
+    ;;
+esac

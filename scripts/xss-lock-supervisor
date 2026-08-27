@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly DEFAULT_RESTART_DELAY=2
+readonly restart_delay="${XSS_LOCK_RESTART_DELAY:-$DEFAULT_RESTART_DELAY}"
+
+watch_xss_lock() {
+  local child_pid=""
+  local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+  [[ "$restart_delay" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'xss-lock-supervisor: restart delay must be a positive integer\n' >&2
+    return 2
+  }
+
+  for command in flock sleep xss-lock; do
+    command -v "$command" >/dev/null 2>&1 || {
+      printf 'xss-lock-supervisor: required command not found: %s\n' \
+        "$command" >&2
+      return 1
+    }
+  done
+
+  [ -d "$runtime_dir" ] || {
+    printf 'xss-lock-supervisor: runtime directory not found: %s\n' \
+      "$runtime_dir" >&2
+    return 1
+  }
+
+  exec 9>"$runtime_dir/xss-lock-supervisor.lock"
+  flock -n 9 || return 0
+
+  stop_supervisor() {
+    if [ -n "$child_pid" ]; then
+      kill -TERM "$child_pid" 2>/dev/null || true
+      wait "$child_pid" 2>/dev/null || true
+      child_pid=""
+    fi
+    exit 0
+  }
+  trap stop_supervisor HUP INT TERM
+
+  while :; do
+    xss-lock --transfer-sleep-lock -- "$HOME/.local/bin/lock-screen" 9>&- &
+    child_pid=$!
+    wait "$child_pid" || true
+    child_pid=""
+
+    sleep "$restart_delay" 9>&- &
+    child_pid=$!
+    wait "$child_pid" || true
+    child_pid=""
+  done
+}
+
+watch_xss_lock

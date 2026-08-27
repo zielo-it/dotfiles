@@ -166,10 +166,13 @@ no persistence service is installed automatically.
 ## Session locking and lid policy
 
 The X11 idle timer locks the session after 5 minutes and powers the displays
-off after 10 minutes. `Mod+Shift+x`, `loginctl lock-session`, and suspend all
-use the same `i3lock` wrapper. The wrapper correctly releases logind's sleep
-delay only after the lock window exists, avoiding an unlocked suspend/resume
-race.
+off after 10 minutes. A small i3 watcher keeps both timers awake while a
+full-screen window is present on any visible workspace, so uninterrupted video
+playback does not trigger the lock screen. Manual locking and suspend are not
+inhibited. `Mod+Shift+x`, `loginctl lock-session`, and suspend all use the same
+`i3lock` wrapper. A small supervisor restarts `xss-lock` if it exits
+unexpectedly. The wrapper correctly releases logind's sleep delay only after
+the lock window exists, avoiding an unlocked suspend/resume race.
 
 The installed logind drop-in suspends on lid close both on battery and external
 power, while ignoring the lid when docked. Reboot after changing this file.
